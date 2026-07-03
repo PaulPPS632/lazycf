@@ -27,14 +27,14 @@ if (!os || !arch) {
 const REPO = 'PaulPPS632/lazycf'; 
 
 // NPM inyecta la versión del package.json en esta variable de entorno. 
-// Si falla, cae al '1.0.0' por defecto.
-const VERSION = process.env.npm_package_version || '1.0.0'; 
+// Si falla, cae al '0.1.0' por defecto.
+const VERSION = process.env.npm_package_version || '0.1.0'; 
 
 const isWindows = os === 'windows';
 const assetName = isWindows ? `lazycf-windows-amd64.exe` : `lazycf-${os}-amd64`;
 const finalBinName = isWindows ? 'lazycf.exe' : 'lazycf';
 
-// Construir la URL de descarga (Asumiendo que tus tags en GitHub empiezan con 'v', ej: v1.0.0)
+// Construir la URL de descarga (Asumiendo que tus tags en GitHub empiezan con 'v', ej: v0.1.0)
 const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${assetName}`;
 
 // 3. Preparar la carpeta de destino

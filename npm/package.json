@@ -1,6 +1,6 @@
 {
   "name": "lazycf",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "TUI lazy para gestionar la infraestructura de Cloudflare desde la terminal",
   "main": "index.js",
   "bin": {
