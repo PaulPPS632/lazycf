@@ -6,6 +6,10 @@
   "bin": {
     "lazycf": "bin/lazycf"
   },
+  "files": [
+    "install.js",
+    "bin/lazycf"
+  ],
   "scripts": {
     "postinstall": "node install.js"
   },
@@ -15,6 +19,6 @@
   "type": "commonjs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PaulPPS632/lazycf.git"
+    "url": "git+https://github.com/PaulPPS632/lazycf.git"
   }
 }

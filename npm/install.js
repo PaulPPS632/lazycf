@@ -11,7 +11,7 @@ const platformToOs = {
 
 const archToArch = {
   x64: 'amd64',
-  // Si luego en GitHub Actions agregas compilación para Mac M1/M2, agregarías: arm64: 'aarch64'
+  arm64: 'arm64' // Mac M1/M2/M3 (asset lazycf-macos-arm64 en la release)
 };
 
 const os = platformToOs[process.platform];
@@ -31,8 +31,14 @@ const REPO = 'PaulPPS632/lazycf';
 const VERSION = process.env.npm_package_version || '0.1.0'; 
 
 const isWindows = os === 'windows';
-const assetName = isWindows ? `lazycf-windows-amd64.exe` : `lazycf-${os}-amd64`;
-const finalBinName = isWindows ? 'lazycf.exe' : 'lazycf';
+// Solo publicamos arm64 para macOS; en Linux/Windows únicamente amd64.
+if (arch === 'arm64' && os !== 'macos') {
+  console.error(`❌ Error: no hay binario ${os}-arm64 publicado todavía.`);
+  process.exit(1);
+}
+const assetName = isWindows ? `lazycf-windows-${arch}.exe` : `lazycf-${os}-${arch}`;
+// El binario real va aparte del shim `bin/lazycf` (que es el entry de npm).
+const finalBinName = isWindows ? 'lazycf-bin.exe' : 'lazycf-bin';
 
 // Construir la URL de descarga (Asumiendo que tus tags en GitHub empiezan con 'v', ej: v0.1.0)
 const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${assetName}`;
