@@ -44,3 +44,14 @@ pub fn restore() {
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
 }
+
+/// Copia texto al portapapeles del sistema vía OSC 52 (lo soportan la mayoría
+/// de terminales modernos). Silencioso si el terminal lo ignora.
+pub fn osc52_copy(text: &str) {
+    use base64::Engine;
+    use std::io::Write;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut out = stdout();
+    let _ = write!(out, "\x1b]52;c;{b64}\x07");
+    let _ = out.flush();
+}

@@ -1,6 +1,7 @@
 //! Intenciones de alto nivel. Los componentes y las tareas async (resultados
 //! de red) emiten `Action`; `app.rs` las enruta en `dispatch`.
 
+use crate::api::r2::ObjectList;
 use crate::components::r2::BucketInfo;
 use crate::model::{
     Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, QueryOutcome, R2Bucket,
@@ -191,4 +192,33 @@ pub enum Action {
     R2Mutated(String),
     /// Error en una operación de R2.
     R2Error(String),
+
+    // --- R2: objetos ---
+    /// Listado de objetos (carpetas + archivos) para un bucket/prefijo.
+    R2ObjectsLoaded {
+        bucket: String,
+        prefix: String,
+        list: ObjectList,
+    },
+    /// Error listando objetos.
+    R2ObjectsError(String),
+    /// Subir el archivo local `path` al prefijo actual.
+    UploadObject { path: String },
+    /// Borrar el objeto `key` (tras confirmación).
+    DeleteObject { key: String },
+    /// Mutación de objeto OK: fija estado y recarga el listado actual.
+    ObjectMutated(String),
+    /// Descarga completada (ruta local) o estado de objeto sin recarga.
+    ObjectStatus(String),
+    /// Error en una operación de objeto (se muestra en form si hay uno).
+    ObjectError(String),
+    /// Guardar credenciales R2 (Access Key + Secret) para URLs prefirmadas.
+    SaveR2Creds { access_key: String, secret: String },
+    /// Generar la URL prefirmada de `key` (cálculo local con las credenciales R2).
+    GeneratePresign { key: String, expires: u64 },
+    /// Imagen descargada y decodificada (o error) para previsualizar.
+    ImageDecoded {
+        key: String,
+        result: Result<(u32, u32, Vec<u8>), String>,
+    },
 }

@@ -16,10 +16,11 @@ use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, BindingEdit, Confirm, Help, HelpSection, HttpTest, Message, NewBucket, NewTunnel,
-    Popup, RField, RecordForm, TokenEntry,
+    AccountPicker, BindingEdit, Confirm, Help, HelpSection, HttpTest, ImageView, Message,
+    NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, TokenEntry,
+    UploadForm,
 };
-use crate::components::r2::{BucketInfo, R2View};
+use crate::components::r2::{BucketInfo, Entry, R2View};
 use crate::components::sidebar::Sidebar;
 use crate::components::tunnels::TunnelsView;
 use crate::components::workers::{Loadable, WorkersView};
@@ -48,6 +49,7 @@ enum Focus {
     D1Editor,
     D1Results,
     R2Buckets,
+    R2Objects,
 }
 
 pub struct App {
@@ -82,6 +84,8 @@ pub struct App {
 
     // R2.
     r2: R2View,
+    /// Objeto pendiente de URL prefirmada (a la espera de credenciales R2).
+    pending_presign: Option<String>,
 
     // Componentes de shell.
     sidebar: Sidebar,
@@ -100,6 +104,7 @@ pub struct App {
     rect_d1_editor: Option<Rect>,
     rect_d1_results: Option<Rect>,
     rect_r2: Option<Rect>,
+    rect_r2_objects: Option<Rect>,
 }
 
 impl App {
@@ -127,6 +132,7 @@ impl App {
             tail_stop: None,
             d1: D1View::new(),
             r2: R2View::new(),
+            pending_presign: None,
             sidebar: Sidebar::new(),
             detail: Detail::new(),
             command_bar: CommandBar,
@@ -141,6 +147,7 @@ impl App {
             rect_d1_editor: None,
             rect_d1_results: None,
             rect_r2: None,
+            rect_r2_objects: None,
         };
 
         match secrets::load_token() {
@@ -347,6 +354,21 @@ impl App {
                 && let Some(name) = self.r2.selected_name()
             {
                 self.load_bucket_info(name);
+                self.r2.reset_browser();
+                self.load_objects();
+            }
+            return;
+        }
+        if let Some(r) = self.rect_r2_objects
+            && r.contains(pos)
+        {
+            self.focus = Focus::R2Objects;
+            let rel = pos.y.saturating_sub(r.y + 1) as usize;
+            // Segundo click sobre una carpeta/.. ya seleccionada → abrir.
+            if !self.r2.entry_at(rel)
+                && matches!(self.r2.selected_entry(), Some(Entry::Folder(_) | Entry::Up))
+            {
+                self.open_entry();
             }
         }
     }
@@ -416,6 +438,13 @@ impl App {
         {
             self.focus = Focus::R2Buckets;
             self.change_bucket(delta);
+            return;
+        }
+        if let Some(r) = self.rect_r2_objects
+            && r.contains(pos)
+        {
+            self.focus = Focus::R2Objects;
+            self.r2.select_entry(delta);
         }
     }
 
@@ -527,6 +556,26 @@ impl App {
                 KeyCode::Char('r') => self.load_buckets(),
                 _ => {}
             },
+            Focus::R2Objects => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.r2.select_entry(-1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.r2.select_entry(1);
+                }
+                KeyCode::Enter => self.open_entry(),
+                KeyCode::Backspace | KeyCode::Char('h') if !self.r2.prefix.is_empty() => {
+                    let parent = self.r2.parent_prefix();
+                    self.navigate_to(parent);
+                }
+                KeyCode::Char('u') => self.open_upload(),
+                KeyCode::Char('d') => self.spawn_download(),
+                KeyCode::Char('x') => self.confirm_delete_object(),
+                KeyCode::Char('p') => self.open_presign(),
+                KeyCode::Char('v') => self.spawn_preview(),
+                KeyCode::Char('r') => self.load_objects(),
+                _ => {}
+            },
         }
     }
 
@@ -565,6 +614,9 @@ impl App {
             RecordForm,
             HttpTest,
             BindingEdit,
+            Upload,
+            R2Creds,
+            Presign,
             Message,
         }
         let kind = match self.popup.as_ref()? {
@@ -577,6 +629,11 @@ impl App {
             Popup::RecordForm(_) => Kind::RecordForm,
             Popup::HttpTest(_) => Kind::HttpTest,
             Popup::BindingEdit(_) => Kind::BindingEdit,
+            Popup::Upload(_) => Kind::Upload,
+            Popup::R2Creds(_) => Kind::R2Creds,
+            Popup::Presign(_) => Kind::Presign,
+            // El visor de imagen se cierra con cualquier tecla, como Help.
+            Popup::ImageView(_) => Kind::Help,
             Popup::Message(_) => Kind::Message,
         };
 
@@ -844,6 +901,110 @@ impl App {
                         KeyCode::Down | KeyCode::Tab => b.move_field(1),
                         code => edit_input(b.active_text_mut(), code),
                     }
+                }
+                None
+            }
+            Kind::Upload => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::Upload(u)) if u.submitting) {
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    let path = match self.popup.as_ref() {
+                        Some(Popup::Upload(u)) => u.path.value().trim().to_string(),
+                        _ => return None,
+                    };
+                    if let Some(Popup::Upload(u)) = self.popup.as_mut() {
+                        if path.is_empty() {
+                            u.error = Some("La ruta es obligatoria".into());
+                            return None;
+                        }
+                        u.error = None;
+                        u.submitting = true;
+                    }
+                    return Some(Action::UploadObject { path });
+                }
+                if let Some(Popup::Upload(u)) = self.popup.as_mut() {
+                    edit_input(&mut u.path, key.code);
+                }
+                None
+            }
+            Kind::R2Creds => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    self.pending_presign = None;
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    let (ak, sk) = match self.popup.as_ref() {
+                        Some(Popup::R2Creds(c)) => (
+                            c.access_key.value().trim().to_string(),
+                            c.secret.value().trim().to_string(),
+                        ),
+                        _ => return None,
+                    };
+                    if ak.is_empty() || sk.is_empty() {
+                        if let Some(Popup::R2Creds(c)) = self.popup.as_mut() {
+                            c.error = Some("Access Key y Secret son obligatorios".into());
+                        }
+                        return None;
+                    }
+                    self.popup = None;
+                    return Some(Action::SaveR2Creds {
+                        access_key: ak,
+                        secret: sk,
+                    });
+                }
+                if let Some(Popup::R2Creds(c)) = self.popup.as_mut() {
+                    match key.code {
+                        KeyCode::Up | KeyCode::BackTab | KeyCode::Down | KeyCode::Tab => {
+                            c.field = 1 - c.field;
+                        }
+                        code => {
+                            let input = if c.field == 0 {
+                                &mut c.access_key
+                            } else {
+                                &mut c.secret
+                            };
+                            edit_input(input, code);
+                        }
+                    }
+                }
+                None
+            }
+            Kind::Presign => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    let (key_obj, expires) = match self.popup.as_ref() {
+                        Some(Popup::Presign(p)) => {
+                            (p.key.clone(), p.expires.value().trim().parse::<u64>())
+                        }
+                        _ => return None,
+                    };
+                    match expires {
+                        Ok(secs @ 1..=604_800) => {
+                            self.popup = None;
+                            return Some(Action::GeneratePresign {
+                                key: key_obj,
+                                expires: secs,
+                            });
+                        }
+                        _ => {
+                            if let Some(Popup::Presign(p)) = self.popup.as_mut() {
+                                p.error = Some("Segundos entre 1 y 604800 (7 días)".into());
+                            }
+                            return None;
+                        }
+                    }
+                }
+                if let Some(Popup::Presign(p)) = self.popup.as_mut() {
+                    edit_input(&mut p.expires, key.code);
                 }
                 None
             }
@@ -1176,6 +1337,7 @@ impl App {
                 self.r2.set_buckets(buckets);
                 if let Some(name) = self.r2.selected_name() {
                     self.load_bucket_info(name);
+                    self.load_objects();
                 }
             }
             Action::R2InfoLoaded { bucket, info } => {
@@ -1191,6 +1353,67 @@ impl App {
                 self.r2.loading = false;
                 self.r2.error = Some(e.clone());
                 self.status = format!("Error: {e}");
+            }
+
+            Action::R2ObjectsLoaded {
+                bucket,
+                prefix,
+                list,
+            } => {
+                if self.r2.selected_name().as_deref() == Some(bucket.as_str()) {
+                    self.r2.set_objects(&prefix, list);
+                }
+            }
+            Action::R2ObjectsError(e) => self.r2.set_objects_error(e),
+            Action::UploadObject { path } => self.spawn_upload(path),
+            Action::DeleteObject { key } => self.spawn_delete_object(key),
+            Action::ObjectMutated(msg) => {
+                self.status = msg;
+                if matches!(self.popup, Some(Popup::Upload(_))) {
+                    self.popup = None;
+                }
+                self.load_objects();
+                // El uso del bucket cambió: refresca la info.
+                if let Some(name) = self.r2.selected_name() {
+                    self.load_bucket_info(name);
+                }
+            }
+            Action::ObjectStatus(msg) => self.status = msg,
+            Action::ObjectError(e) => {
+                if let Some(Popup::Upload(u)) = self.popup.as_mut() {
+                    u.submitting = false;
+                    u.error = Some(e);
+                } else {
+                    self.status = format!("Error: {e}");
+                }
+            }
+            Action::SaveR2Creds { access_key, secret } => {
+                match secrets::save_r2_credentials(&access_key, &secret) {
+                    Ok(()) => {
+                        self.status = "Credenciales R2 guardadas".into();
+                        // Continúa el flujo de presign si venía de ahí.
+                        if let Some(key) = self.pending_presign.take() {
+                            self.popup = Some(Popup::Presign(PresignForm {
+                                key,
+                                expires: TextInput::new("3600"),
+                                error: None,
+                            }));
+                        }
+                    }
+                    Err(e) => self.status = format!("Keyring: {e}"),
+                }
+            }
+            Action::GeneratePresign { key, expires } => self.generate_presign(key, expires),
+            Action::ImageDecoded { key, result } => {
+                match result {
+                    Ok((w, h, rgb)) => {
+                        let lines = crate::components::r2::image_lines(w, h, &rgb);
+                        let title = key.rsplit('/').next().unwrap_or(&key).to_string();
+                        self.popup = Some(Popup::ImageView(ImageView { title, lines }));
+                        self.status.clear();
+                    }
+                    Err(e) => self.status = format!("Preview: {e}"),
+                }
             }
         }
     }
@@ -2037,7 +2260,253 @@ impl App {
             && let Some(name) = self.r2.selected_name()
         {
             self.load_bucket_info(name);
+            self.r2.reset_browser();
+            self.load_objects();
         }
+    }
+
+    /// Lista los objetos del bucket seleccionado bajo el prefijo actual.
+    fn load_objects(&mut self) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client.clone(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let prefix = self.r2.prefix.clone();
+        self.r2.begin_objects();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let action = match client.list_objects(&account_id, &bucket, &prefix).await {
+                Ok(list) => Action::R2ObjectsLoaded {
+                    bucket,
+                    prefix,
+                    list,
+                },
+                Err(e) => Action::R2ObjectsError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn navigate_to(&mut self, prefix: String) {
+        self.r2.prefix = prefix;
+        self.load_objects();
+    }
+
+    /// Enter sobre una fila del navegador: carpeta → entrar; imagen → preview.
+    fn open_entry(&mut self) {
+        match self.r2.selected_entry().cloned() {
+            Some(Entry::Up) => {
+                let parent = self.r2.parent_prefix();
+                self.navigate_to(parent);
+            }
+            Some(Entry::Folder(prefix)) => self.navigate_to(prefix),
+            Some(Entry::File(o)) if o.is_image() => self.spawn_preview(),
+            Some(Entry::File(_)) => {
+                self.status = "d descargar · p URL prefirmada · v ver (imágenes)".into();
+            }
+            None => {}
+        }
+    }
+
+    fn open_upload(&mut self) {
+        let Some(bucket) = self.r2.selected_name() else {
+            return;
+        };
+        self.popup = Some(Popup::Upload(UploadForm {
+            dest: format!("{bucket}/{}", self.r2.prefix),
+            ..Default::default()
+        }));
+    }
+
+    fn spawn_upload(&mut self, path: String) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client.clone(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let prefix = self.r2.prefix.clone();
+        let tx = self.action_tx.clone();
+        self.status = "Subiendo…".into();
+        tokio::spawn(async move {
+            let action = match tokio::fs::read(&path).await {
+                Ok(body) => {
+                    let filename = std::path::Path::new(&path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "archivo".into());
+                    let key = format!("{prefix}{filename}");
+                    let ct = mime_guess::from_path(&path)
+                        .first_or_octet_stream()
+                        .essence_str()
+                        .to_string();
+                    match client
+                        .put_object(&account_id, &bucket, &key, body, &ct)
+                        .await
+                    {
+                        Ok(()) => Action::ObjectMutated(format!("Subido {filename}")),
+                        Err(e) => Action::ObjectError(e.to_string()),
+                    }
+                }
+                Err(e) => Action::ObjectError(format!("leyendo {path}: {e}")),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    /// Descarga el archivo seleccionado a ~/Descargas (o el directorio actual).
+    fn spawn_download(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client.clone(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let key = file.key.clone();
+        let filename = file.filename().to_string();
+        let dir = directories::UserDirs::new()
+            .and_then(|u| u.download_dir().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let tx = self.action_tx.clone();
+        self.status = format!("Descargando {filename}…");
+        tokio::spawn(async move {
+            let action = match client.get_object(&account_id, &bucket, &key).await {
+                Ok(bytes) => {
+                    let dest = dir.join(&filename);
+                    match tokio::fs::write(&dest, bytes).await {
+                        Ok(()) => Action::ObjectStatus(format!("Guardado en {}", dest.display())),
+                        Err(e) => Action::ObjectError(format!("escribiendo {}: {e}", dest.display())),
+                    }
+                }
+                Err(e) => Action::ObjectError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn confirm_delete_object(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let key = file.key.clone();
+        let name = file.filename().to_string();
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Borrar objeto".into(),
+            body: format!("¿Borrar {name}?"),
+            on_yes: Action::DeleteObject { key },
+        }));
+    }
+
+    fn spawn_delete_object(&mut self, key: String) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client.clone(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Borrando objeto…".into();
+        tokio::spawn(async move {
+            let action = match client.delete_object(&account_id, &bucket, &key).await {
+                Ok(()) => Action::ObjectMutated("Objeto borrado".into()),
+                Err(e) => Action::ObjectError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    /// `p`: URL prefirmada. Si no hay credenciales R2 guardadas, las pide antes.
+    fn open_presign(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let key = file.key.clone();
+        match secrets::load_r2_credentials() {
+            Ok(Some(_)) => {
+                self.popup = Some(Popup::Presign(PresignForm {
+                    key,
+                    expires: TextInput::new("3600"),
+                    error: None,
+                }));
+            }
+            _ => {
+                self.pending_presign = Some(key);
+                self.popup = Some(Popup::R2Creds(R2CredsForm::default()));
+            }
+        }
+    }
+
+    /// Cálculo local de la URL prefirmada (SigV4); la copia vía OSC 52.
+    fn generate_presign(&mut self, key: String, expires: u64) {
+        let (Some(account_id), Some(bucket)) = (
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        match secrets::load_r2_credentials() {
+            Ok(Some((ak, sk))) => {
+                let url = crate::api::r2::presign_get(
+                    &account_id,
+                    &ak,
+                    &sk,
+                    &bucket,
+                    &key,
+                    expires,
+                    Utc::now(),
+                );
+                crate::tui::osc52_copy(&url);
+                self.popup = Some(Popup::Message(Message {
+                    title: "URL prefirmada".into(),
+                    body: format!(
+                        "{url}\n\nVálida {expires}s · copiada al portapapeles (OSC 52)."
+                    ),
+                    is_error: false,
+                }));
+            }
+            _ => self.status = "No hay credenciales R2 guardadas".into(),
+        }
+    }
+
+    /// Descarga y decodifica la imagen seleccionada para verla en el terminal.
+    fn spawn_preview(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        if !file.is_image() {
+            self.status = "Solo se pueden previsualizar imágenes".into();
+            return;
+        }
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client.clone(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let key = file.key.clone();
+        let tx = self.action_tx.clone();
+        self.status = "Cargando imagen…".into();
+        tokio::spawn(async move {
+            let result = match client.get_object(&account_id, &bucket, &key).await {
+                Ok(bytes) => crate::components::r2::decode_image(&bytes, 100, 40),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(Action::ImageDecoded { key, result });
+        });
     }
 
     fn open_new_bucket(&mut self) {
@@ -2155,7 +2624,7 @@ impl App {
             Focus::D1Editor,
             Focus::D1Results,
         ];
-        static R2_PANES: &[Focus] = &[Focus::Modules, Focus::R2Buckets];
+        static R2_PANES: &[Focus] = &[Focus::Modules, Focus::R2Buckets, Focus::R2Objects];
         static BASE_PANES: &[Focus] = &[Focus::Modules];
         match self.sidebar.module() {
             Module::Dns => DNS_PANES,
@@ -2275,6 +2744,20 @@ impl App {
                     ("r", "recargar buckets"),
                 ],
             ),
+            Focus::R2Objects => HelpSection::new(
+                "Objetos R2",
+                vec![
+                    ("↑ ↓ / k j", "navegar objetos"),
+                    ("Enter", "abrir carpeta / ver imagen"),
+                    ("Backspace / h", "subir un nivel"),
+                    ("u", "subir un archivo local"),
+                    ("d", "descargar a ~/Descargas"),
+                    ("p", "URL prefirmada (pide credenciales R2 una vez)"),
+                    ("v", "previsualizar imagen en el terminal"),
+                    ("x", "borrar objeto (con confirmación)"),
+                    ("r", "recargar listado"),
+                ],
+            ),
         });
         Help { sections }
     }
@@ -2296,6 +2779,7 @@ impl App {
         self.rect_d1_editor = None;
         self.rect_d1_results = None;
         self.rect_r2 = None;
+        self.rect_r2_objects = None;
 
         self.sidebar.draw(
             frame,
@@ -2346,11 +2830,15 @@ impl App {
                 self.rect_d1_results = Some(result_area);
             }
             Module::R2 if main_active => {
-                let (list_area, detail_area) = crate::components::r2::split(shell.main);
+                let (buckets_area, info_area, objects_area) =
+                    crate::components::r2::split(shell.main);
                 self.r2
-                    .draw_list(frame, list_area, self.focus == Focus::R2Buckets);
-                self.r2.draw_detail(frame, detail_area);
-                self.rect_r2 = Some(list_area);
+                    .draw_buckets(frame, buckets_area, self.focus == Focus::R2Buckets);
+                self.r2.draw_info(frame, info_area);
+                self.r2
+                    .draw_objects(frame, objects_area, self.focus == Focus::R2Objects);
+                self.rect_r2 = Some(buckets_area);
+                self.rect_r2_objects = Some(objects_area);
             }
             _ => {
                 self.detail.draw(
@@ -2400,7 +2888,10 @@ impl App {
                 Focus::D1Tables => "↑↓ tabla · Enter SELECT * · Tab → editor · r · ?".into(),
                 Focus::D1Editor => "escribe SQL · F5/Ctrl+Enter ejecutar · Tab → · ?".into(),
                 Focus::D1Results => "↑↓ scroll · PgUp/PgDn · Tab → · ? ayuda".into(),
-                Focus::R2Buckets => "↑↓ bucket · n nuevo · d borrar · r · A · ? ayuda".into(),
+                Focus::R2Buckets => "↑↓ bucket · n nuevo · d borrar · Tab → objetos · ?".into(),
+                Focus::R2Objects => {
+                    "Enter abrir · u subir · d descargar · p URL · v ver · x borrar · ?".into()
+                }
             }
         };
         (left, right)

@@ -108,6 +108,61 @@ impl CfClient {
         self.send_ok::<()>(Method::DELETE, path, None).await
     }
 
+    /// GET que devuelve el envelope completo como JSON (para endpoints con
+    /// `result_info` extendido, p. ej. objetos R2 con `delimited`/`cursor`).
+    pub async fn get_value(&self, path: &str) -> Result<serde_json::Value> {
+        let (status, text) = self.raw::<()>(Method::GET, path, None).await?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| eyre!("decodificando {path}: {e}; cuerpo: {}", truncate(&text, 300)))?;
+        if !v["success"].as_bool().unwrap_or(false) {
+            let msg = v["errors"]
+                .as_array()
+                .map(|errs| {
+                    errs.iter()
+                        .filter_map(|e| e["message"].as_str())
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            bail!("{}", if msg.is_empty() { format!("Error HTTP {status}") } else { msg });
+        }
+        Ok(v)
+    }
+
+    /// GET que devuelve el cuerpo binario tal cual (descarga de objetos R2).
+    /// En error el cuerpo es el envelope JSON → se extrae el mensaje.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let url = format!("{BASE}{path}");
+        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            Self::check::<serde_json::Value>(path, status, &text)?;
+            bail!("Error HTTP {status}");
+        }
+        Ok(bytes.to_vec())
+    }
+
+    /// PUT con cuerpo binario (subida de objetos R2); la respuesta es envelope.
+    pub async fn put_bytes(&self, path: &str, body: Vec<u8>, content_type: &str) -> Result<()> {
+        let url = format!("{BASE}{path}");
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        Self::check::<serde_json::Value>(path, status, &text)?;
+        Ok(())
+    }
+
     /// Envía un formulario `multipart/form-data` y solo comprueba éxito.
     /// Sin backoff de 429 (mutaciones puntuales); reutiliza el decoder de envelope.
     pub async fn multipart_ok(

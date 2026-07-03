@@ -44,3 +44,29 @@ pub fn delete_token() -> Result<()> {
         Err(e) => Err(e).wrap_err("borrando token del keyring"),
     }
 }
+
+// --- Credenciales R2 (Access Key + Secret para URLs prefirmadas S3) ---
+
+const R2_ACCOUNT: &str = "r2-credentials";
+
+fn r2_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, R2_ACCOUNT).wrap_err("abriendo entrada R2 del keyring")
+}
+
+/// Carga las credenciales R2 `(access_key_id, secret)`. `None` si no hay.
+pub fn load_r2_credentials() -> Result<Option<(String, String)>> {
+    match r2_entry()?.get_password() {
+        Ok(joined) => Ok(joined
+            .split_once('\n')
+            .map(|(ak, sk)| (ak.to_string(), sk.to_string()))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e).wrap_err("leyendo credenciales R2 del keyring"),
+    }
+}
+
+/// Guarda las credenciales R2 en el keychain (una entrada, `ak\nsk`).
+pub fn save_r2_credentials(access_key: &str, secret: &str) -> Result<()> {
+    r2_entry()?
+        .set_password(&format!("{access_key}\n{secret}"))
+        .wrap_err("guardando credenciales R2 en el keyring")
+}

@@ -26,6 +26,14 @@ pub enum Popup {
     NewTunnel(NewTunnel),
     /// Entrada del nombre para crear un bucket R2.
     NewBucket(NewBucket),
+    /// Subir un archivo a R2.
+    Upload(UploadForm),
+    /// Pedir credenciales R2 (para URLs prefirmadas).
+    R2Creds(R2CredsForm),
+    /// Pedir expiración de la URL prefirmada.
+    Presign(PresignForm),
+    /// Previsualización de imagen.
+    ImageView(ImageView),
     /// Formulario de crear/editar registro DNS.
     RecordForm(RecordForm),
     /// Prueba HTTP de una ruta de Worker.
@@ -119,6 +127,39 @@ pub struct NewTunnel {
 pub struct NewBucket {
     pub name: TextInput,
     pub error: Option<String>,
+}
+
+/// Subir un archivo local al prefijo actual del bucket.
+#[derive(Default)]
+pub struct UploadForm {
+    /// Destino visible (bucket/prefijo) — informativo.
+    pub dest: String,
+    pub path: TextInput,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
+/// Credenciales R2 (Access Key + Secret) para URLs prefirmadas S3.
+#[derive(Default)]
+pub struct R2CredsForm {
+    pub access_key: TextInput,
+    pub secret: TextInput,
+    /// 0 = access key, 1 = secret.
+    pub field: usize,
+    pub error: Option<String>,
+}
+
+/// Expiración (segundos) para la URL prefirmada del objeto `key`.
+pub struct PresignForm {
+    pub key: String,
+    pub expires: TextInput,
+    pub error: Option<String>,
+}
+
+/// Visor de imagen en terminal (medias celdas ▀ RGB).
+pub struct ImageView {
+    pub title: String,
+    pub lines: Vec<Line<'static>>,
 }
 
 /// Prueba HTTP: URL a golpear.
@@ -352,6 +393,10 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::Help(h) => draw_help(frame, area, h),
         Popup::NewTunnel(t) => draw_new_tunnel(frame, area, t),
         Popup::NewBucket(b) => draw_new_bucket(frame, area, b),
+        Popup::Upload(u) => draw_upload(frame, area, u),
+        Popup::R2Creds(c) => draw_r2_creds(frame, area, c),
+        Popup::Presign(p) => draw_presign(frame, area, p),
+        Popup::ImageView(v) => draw_image_view(frame, area, v),
         Popup::RecordForm(f) => draw_record_form(frame, area, f),
         Popup::HttpTest(t) => draw_http_test(frame, area, t),
         Popup::BindingEdit(b) => draw_binding_edit(frame, area, b),
@@ -460,6 +505,145 @@ fn draw_http_test(frame: &mut Frame, area: Rect, t: &HttpTest) {
             .title_style(theme::title(true)),
     )
     .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
+}
+
+fn draw_upload(frame: &mut Frame, area: Rect, u: &UploadForm) {
+    let rect = layout::centered(area, 76, 9);
+    frame.render_widget(Clear, rect);
+    let status: Line = if u.submitting {
+        Line::from(Span::styled("Subiendo…", Style::default().fg(theme::ACCENT)))
+    } else if let Some(e) = &u.error {
+        Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR)))
+    } else {
+        Line::from(Span::styled(
+            "Enter subir · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        ))
+    };
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!("Destino: {}", u.dest),
+            Style::default().fg(theme::DIM),
+        )),
+        Line::from(""),
+        Line::from("Ruta del archivo local:"),
+        Line::from(u.path.spans(!u.submitting)),
+        Line::from(""),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" ⬆ Subir objeto ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    )
+    .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
+}
+
+fn draw_r2_creds(frame: &mut Frame, area: Rect, c: &R2CredsForm) {
+    let rect = layout::centered(area, 76, 11);
+    frame.render_widget(Clear, rect);
+    let status: Line = match &c.error {
+        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        None => Line::from(Span::styled(
+            "↑↓ campo · Enter guardar · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )),
+    };
+    let field = |label: &str, input: &TextInput, active: bool, mask: bool| -> Line<'static> {
+        let marker = if active { "▶ " } else { "  " };
+        let style = if active {
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::DIM)
+        };
+        let mut spans = vec![Span::styled(format!("{marker}{label:<12}"), style)];
+        if mask {
+            spans.push(Span::styled(
+                "•".repeat(input.value().chars().count()),
+                Style::default().fg(theme::FG),
+            ));
+            if active {
+                spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+            }
+        } else {
+            spans.extend(input.spans(active));
+        }
+        Line::from(spans)
+    };
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(
+            "Credenciales R2 (API Token S3 → se guardan en el keyring):",
+            Style::default().fg(theme::DIM),
+        )),
+        Line::from(""),
+        field("Access Key", &c.access_key, c.field == 0, false),
+        field("Secret", &c.secret, c.field == 1, true),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Créalas en dash.cloudflare.com → R2 → Manage API Tokens",
+            Style::default().fg(theme::DIM),
+        )),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" 🔑 Credenciales R2 ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    )
+    .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
+}
+
+fn draw_presign(frame: &mut Frame, area: Rect, p: &PresignForm) {
+    let rect = layout::centered(area, 70, 9);
+    frame.render_widget(Clear, rect);
+    let status: Line = match &p.error {
+        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        None => Line::from(Span::styled(
+            "Enter generar · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )),
+    };
+    let name = p.key.rsplit('/').next().unwrap_or(&p.key);
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!("Objeto: {name}"),
+            Style::default().fg(theme::DIM),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Expira en (segundos, máx 604800): ", Style::default().fg(theme::FG)),
+        ]),
+        Line::from(p.expires.spans(true)),
+        Line::from(""),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" 🔗 URL prefirmada ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    )
+    .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
+}
+
+fn draw_image_view(frame: &mut Frame, area: Rect, v: &ImageView) {
+    // Tamaño del popup = imagen + borde, recortado a la pantalla.
+    let img_w = v.lines.first().map(|l| l.width()).unwrap_or(0) as u16;
+    let img_h = v.lines.len() as u16;
+    let rect = layout::centered(area, img_w + 2, img_h + 2);
+    frame.render_widget(Clear, rect);
+    let body = Paragraph::new(v.lines.clone()).block(
+        Block::bordered()
+            .title(format!(" 🖼 {} · cualquier tecla cierra ", v.title))
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    );
     frame.render_widget(body, rect);
 }
 
@@ -736,7 +920,15 @@ fn draw_account_picker(frame: &mut Frame, area: Rect, p: &mut AccountPicker) {
 }
 
 fn draw_message(frame: &mut Frame, area: Rect, msg: &Message) {
-    let rect = layout::centered(area, 60, 8);
+    // Alto dinámico: cuerpos largos (p. ej. URLs prefirmadas) necesitan espacio.
+    let width: u16 = 76;
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let body_rows: usize = msg
+        .body
+        .lines()
+        .map(|l| l.chars().count().div_ceil(inner).max(1))
+        .sum();
+    let rect = layout::centered(area, width, (body_rows as u16 + 5).clamp(8, area.height));
     frame.render_widget(Clear, rect);
     let color = if msg.is_error { theme::ERROR } else { theme::ACCENT };
     let body = Paragraph::new(vec![

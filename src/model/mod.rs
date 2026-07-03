@@ -277,6 +277,7 @@ pub struct R2Bucket {
     #[serde(default)]
     pub storage_class: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)] // no cabe en el panel compacto de info
     pub jurisdiction: Option<String>,
 }
 
@@ -289,8 +290,6 @@ pub struct R2Usage {
     pub metadata_size: String,
     #[serde(rename = "objectCount", default)]
     pub object_count: String,
-    #[serde(rename = "uploadCount", default)]
-    pub upload_count: String,
 }
 
 impl R2Usage {
@@ -303,8 +302,43 @@ impl R2Usage {
     pub fn objects(&self) -> u64 {
         self.object_count.parse().unwrap_or(0)
     }
-    pub fn uploads(&self) -> u64 {
-        self.upload_count.parse().unwrap_or(0)
+}
+
+/// Objeto R2 (`GET .../r2/buckets/{b}/objects`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct R2Object {
+    pub key: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub last_modified: String,
+    #[serde(default)]
+    pub http_metadata: Option<R2HttpMeta>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct R2HttpMeta {
+    #[serde(rename = "contentType", default)]
+    pub content_type: Option<String>,
+}
+
+impl R2Object {
+    /// Nombre del archivo (última parte de la clave).
+    pub fn filename(&self) -> &str {
+        self.key.rsplit('/').next().unwrap_or(&self.key)
+    }
+
+    /// `true` si parece una imagen (por content-type o extensión).
+    pub fn is_image(&self) -> bool {
+        if let Some(ct) = self.http_metadata.as_ref().and_then(|m| m.content_type.as_deref())
+            && ct.starts_with("image/")
+        {
+            return true;
+        }
+        let lower = self.key.to_lowercase();
+        [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
     }
 }
 
