@@ -1,31 +1,45 @@
 name: Compilar y Publicar Binarios
 
-# Este flujo se ejecutará automáticamente cada vez que crees
+# Este flujo se ejecutará automáticamente cada vez que publiques
 # un nuevo "Release" en la interfaz de GitHub.
 on:
   release:
-    types: [created]
+    types: [published]
+ 
+# Permiso para escribir en la release (subir assets). Sin esto el
+# GITHUB_TOKEN es de solo lectura y la subida falla con
+# "Resource not accessible by integration".
+permissions:
+  contents: write
 
 jobs:
   build-upload:
-    name: Compilar para ${{ matrix.os }}
+    name: Compilar para ${{ matrix.os }} (${{ matrix.target }})
     # GitHub levantará una máquina virtual con este sistema operativo
     runs-on: ${{ matrix.os }}
-    
+
     # Aquí definimos la matriz de sistemas y los nombres de los archivos
     strategy:
+      # Que un SO falle no cancela los builds de los demás.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: lazycf
             asset_name: lazycf-linux-amd64
-            
+
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: lazycf
             asset_name: lazycf-macos-amd64
-            
+
+          # macos-latest ya corre en Apple Silicon: binario nativo ARM64.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: lazycf
+            asset_name: lazycf-macos-arm64
+
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: lazycf.exe
