@@ -1,0 +1,60 @@
+name: Compilar y Publicar Binarios
+
+# Este flujo se ejecutará automáticamente cada vez que crees
+# un nuevo "Release" en la interfaz de GitHub.
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-upload:
+    name: Compilar para ${{ matrix.os }}
+    # GitHub levantará una máquina virtual con este sistema operativo
+    runs-on: ${{ matrix.os }}
+    
+    # Aquí definimos la matriz de sistemas y los nombres de los archivos
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: lazycf
+            asset_name: lazycf-linux-amd64
+            
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: lazycf
+            asset_name: lazycf-macos-amd64
+            
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: lazycf.exe
+            asset_name: lazycf-windows-amd64.exe
+
+    steps:
+      # 1. Descargar tu código fuente a la máquina virtual
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      # 2. Instalar el compilador de Rust
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # 3. Compilar el proyecto para máximo rendimiento
+      - name: Compilar binario (Modo Release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # 4. Renombrar el binario para que sea fácil de identificar
+      - name: Renombrar archivo
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv ${{ matrix.binary_name }} ${{ matrix.asset_name }}
+
+      # 5. Subir el binario compilado al Release de GitHub
+      - name: Subir binarios a GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}

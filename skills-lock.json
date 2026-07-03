@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "skills": {
+    "ratatui-tui": {
+      "source": "blacktop/dotfiles",
+      "sourceType": "github",
+      "skillPath": "ai/skills/ratatui-tui/SKILL.md",
+      "computedHash": "519ad8e9d88e2cd5e8a9754874b078860524146050f80f1236203c7e140b61bd"
+    },
+    "rust-best-practices": {
+      "source": "apollographql/skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": "5f3890a1ccc7df4c47b7fd14600e2ddd629c513d58118ab668260f4d5d6b30d5"
+    }
+  }
+}

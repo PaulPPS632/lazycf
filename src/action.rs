@@ -1,0 +1,176 @@
+//! Intenciones de alto nivel. Los componentes y las tareas async (resultados
+//! de red) emiten `Action`; `app.rs` las enruta en `dispatch`.
+
+use crate::model::{
+    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, QueryOutcome, Tunnel,
+    WorkerMetrics, WorkerScript, Zone,
+};
+
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Salir de la aplicación.
+    Quit,
+    /// Mover el foco al siguiente panel (Tab) o al anterior (`back = true`).
+    CycleFocus { back: bool },
+
+    // --- Auth ---
+    /// El usuario envió un token para verificar.
+    SubmitToken(String),
+    /// Verificación OK: token válido + cuentas visibles.
+    TokenVerified {
+        token: String,
+        accounts: Vec<Account>,
+    },
+    /// Fallo de autenticación (token inválido, red, keyring, etc.).
+    AuthFailed(String),
+    /// Abrir en el navegador la página de creación de API tokens.
+    OpenTokenPage,
+    /// Abrir el modal de ayuda con todos los atajos.
+    OpenHelp,
+
+    // --- Cuentas ---
+    /// Abrir el selector de cuenta.
+    OpenAccountPicker,
+    /// Cambiar a la cuenta con este índice.
+    SwitchAccount(usize),
+
+    // --- DNS ---
+    /// Zonas cargadas.
+    ZonesLoaded(Vec<Zone>),
+    /// Registros cargados para una zona concreta.
+    RecordsLoaded {
+        zone_id: String,
+        records: Vec<DnsRecord>,
+    },
+    /// Alternar el proxy del registro seleccionado (barra espaciadora).
+    ToggleProxy,
+    /// Confirmar borrado de un registro.
+    DeleteRecord {
+        zone_id: String,
+        record_id: String,
+    },
+    /// Crear o editar un registro (desde el formulario).
+    SubmitRecord {
+        zone_id: String,
+        editing_id: Option<String>,
+        rtype: String,
+        name: String,
+        content: String,
+        ttl: String,
+        proxied: bool,
+        priority: String,
+    },
+    /// Confirmar purga de caché de una zona.
+    PurgeCache {
+        zone_id: String,
+    },
+    /// Error en una operación DNS.
+    DnsError(String),
+    /// Mutación DNS OK: fija estado y recarga los registros de la zona.
+    DnsMutated(String),
+    /// Mensaje de estado sin recarga (p. ej. purga de caché).
+    DnsStatus(String),
+
+    // --- Túneles ---
+    /// Túneles cargados.
+    TunnelsLoaded(Vec<Tunnel>),
+    /// Ingress cargado para un túnel concreto.
+    IngressLoaded {
+        tunnel_id: String,
+        rules: Vec<IngressRule>,
+    },
+    /// Crear un túnel nuevo con este nombre.
+    CreateTunnel(String),
+    /// Túnel creado: muestra el token del conector y recarga.
+    TunnelCreated {
+        name: String,
+        token: String,
+    },
+    /// Limpiar las conexiones de un túnel.
+    CleanupConnections {
+        tunnel_id: String,
+    },
+    /// Borrar un túnel.
+    DeleteTunnel {
+        tunnel_id: String,
+    },
+    /// Error en una operación de túneles.
+    TunnelError(String),
+    /// Mutación de túnel OK: fija estado y recarga la lista.
+    TunnelMutated(String),
+
+    // --- Workers ---
+    /// Scripts cargados.
+    WorkersLoaded(Vec<WorkerScript>),
+    /// Subdominio `*.workers.dev` de la cuenta.
+    SubdomainLoaded(Option<String>),
+    /// Métricas cargadas para un script concreto (`None` = no disponibles).
+    MetricsLoaded {
+        script: String,
+        metrics: Option<WorkerMetrics>,
+    },
+    /// Implementaciones cargadas (`None` = error).
+    DeploymentsLoaded {
+        script: String,
+        deployments: Option<Vec<Deployment>>,
+    },
+    /// Bindings (vars/secretos) cargados (`None` = error).
+    BindingsLoaded {
+        script: String,
+        bindings: Option<Vec<Binding>>,
+    },
+    /// Error en una operación de Workers.
+    WorkersError(String),
+    /// Lanzar una prueba HTTP GET a esta URL.
+    HttpProbe(String),
+    /// Resultado de la prueba HTTP.
+    HttpResult {
+        status: Option<u16>,
+        millis: u128,
+        info: String,
+    },
+
+    // --- Workers: live-tail (Fase 7) ---
+    /// Iniciar el tail de logs de un script.
+    StartTail(String),
+    /// Detener el tail activo.
+    StopTail,
+    /// El WebSocket de tail se conectó.
+    TailStarted { script: String },
+    /// Nuevas líneas de log recibidas por el tail.
+    TailLines { script: String, lines: Vec<String> },
+    /// Error en el tail (creación/WS).
+    TailError { script: String, msg: String },
+    /// El tail terminó (parado, cerrado o expirado).
+    TailEnded { script: String },
+
+    // --- Workers: variables / secretos ---
+    /// Guardar una variable (plain_text) o secreto (secret_text).
+    SaveBinding {
+        script: String,
+        name: String,
+        is_secret: bool,
+        value: String,
+        adding: bool,
+    },
+    /// Binding guardado: fija estado y recarga la pestaña de variables.
+    BindingSaved { script: String, msg: String },
+    /// Error al guardar un binding (mantiene el formulario abierto).
+    BindingError(String),
+
+    // --- D1 (Fase 5) ---
+    /// Bases de datos D1 cargadas.
+    D1DatabasesLoaded(Vec<D1Database>),
+    /// Tablas de una base concreta cargadas.
+    D1TablesLoaded { db_id: String, tables: Vec<String> },
+    /// Error al listar tablas (se muestra en el panel de tablas).
+    D1TablesError(String),
+    /// Resultado de una consulta (título + tabla o error).
+    D1ResultLoaded {
+        db_id: String,
+        title: String,
+        outcome: Result<QueryOutcome, String>,
+    },
+    /// Error al listar bases D1.
+    D1Error(String),
+}
