@@ -2383,7 +2383,20 @@ impl App {
                 Ok(bytes) => {
                     let dest = dir.join(&filename);
                     match tokio::fs::write(&dest, bytes).await {
-                        Ok(()) => Action::ObjectStatus(format!("Guardado en {}", dest.display())),
+                        Ok(()) => {
+                            // Abre el archivo con la app por defecto (detached:
+                            // no bloquea la TUI ni hereda su terminal).
+                            match open::that_detached(&dest) {
+                                Ok(()) => Action::ObjectStatus(format!(
+                                    "Guardado y abierto: {}",
+                                    dest.display()
+                                )),
+                                Err(e) => Action::ObjectStatus(format!(
+                                    "Guardado en {} (no se pudo abrir: {e})",
+                                    dest.display()
+                                )),
+                            }
+                        }
                         Err(e) => Action::ObjectError(format!("escribiendo {}: {e}", dest.display())),
                     }
                 }
@@ -2751,7 +2764,7 @@ impl App {
                     ("Enter", "abrir carpeta / ver imagen"),
                     ("Backspace / h", "subir un nivel"),
                     ("u", "subir un archivo local"),
-                    ("d", "descargar a ~/Descargas"),
+                    ("d", "descargar a ~/Descargas y abrir"),
                     ("p", "URL prefirmada (pide credenciales R2 una vez)"),
                     ("v", "previsualizar imagen en el terminal"),
                     ("x", "borrar objeto (con confirmación)"),
