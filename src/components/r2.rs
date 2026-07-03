@@ -13,6 +13,7 @@ use crate::model::{R2Bucket, R2Usage};
 use crate::ui::theme;
 
 /// Detalle + uso + dominios de un bucket (se cargan juntos).
+#[derive(Debug, Clone)]
 pub struct BucketInfo {
     pub detail: R2Bucket,
     pub usage: R2Usage,

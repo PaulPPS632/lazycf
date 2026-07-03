@@ -16,9 +16,10 @@ use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, BindingEdit, Confirm, Help, HelpSection, HttpTest, Message, NewTunnel, Popup,
-    RField, RecordForm, TokenEntry,
+    AccountPicker, BindingEdit, Confirm, Help, HelpSection, HttpTest, Message, NewBucket, NewTunnel,
+    Popup, RField, RecordForm, TokenEntry,
 };
+use crate::components::r2::{BucketInfo, R2View};
 use crate::components::sidebar::Sidebar;
 use crate::components::tunnels::TunnelsView;
 use crate::components::workers::{Loadable, WorkersView};
@@ -46,6 +47,7 @@ enum Focus {
     D1Tables,
     D1Editor,
     D1Results,
+    R2Buckets,
 }
 
 pub struct App {
@@ -78,6 +80,9 @@ pub struct App {
     // D1.
     d1: D1View,
 
+    // R2.
+    r2: R2View,
+
     // Componentes de shell.
     sidebar: Sidebar,
     detail: Detail,
@@ -94,6 +99,7 @@ pub struct App {
     rect_d1_tables: Option<Rect>,
     rect_d1_editor: Option<Rect>,
     rect_d1_results: Option<Rect>,
+    rect_r2: Option<Rect>,
 }
 
 impl App {
@@ -120,6 +126,7 @@ impl App {
             workers: WorkersView::new(),
             tail_stop: None,
             d1: D1View::new(),
+            r2: R2View::new(),
             sidebar: Sidebar::new(),
             detail: Detail::new(),
             command_bar: CommandBar,
@@ -133,6 +140,7 @@ impl App {
             rect_d1_tables: None,
             rect_d1_editor: None,
             rect_d1_results: None,
+            rect_r2: None,
         };
 
         match secrets::load_token() {
@@ -328,6 +336,18 @@ impl App {
             && r.contains(pos)
         {
             self.focus = Focus::D1Results;
+            return;
+        }
+        if let Some(r) = self.rect_r2
+            && r.contains(pos)
+        {
+            self.focus = Focus::R2Buckets;
+            let rel = pos.y.saturating_sub(r.y + 1) as usize;
+            if self.r2.bucket_at(rel)
+                && let Some(name) = self.r2.selected_name()
+            {
+                self.load_bucket_info(name);
+            }
         }
     }
 
@@ -389,6 +409,13 @@ impl App {
         {
             self.focus = Focus::D1Results;
             self.d1.scroll_result(delta);
+            return;
+        }
+        if let Some(r) = self.rect_r2
+            && r.contains(pos)
+        {
+            self.focus = Focus::R2Buckets;
+            self.change_bucket(delta);
         }
     }
 
@@ -492,6 +519,14 @@ impl App {
                 KeyCode::PageDown => self.d1.scroll_result(10),
                 _ => {}
             },
+            Focus::R2Buckets => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.change_bucket(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.change_bucket(1),
+                KeyCode::Char('n') => self.open_new_bucket(),
+                KeyCode::Char('d') => self.confirm_delete_bucket(),
+                KeyCode::Char('r') => self.load_buckets(),
+                _ => {}
+            },
         }
     }
 
@@ -510,6 +545,9 @@ impl App {
             Module::D1 if self.d1.is_empty() && !self.d1.loading => {
                 self.load_databases();
             }
+            Module::R2 if self.r2.is_empty() && !self.r2.loading => {
+                self.load_buckets();
+            }
             _ => {}
         }
     }
@@ -523,6 +561,7 @@ impl App {
             Account,
             Help,
             NewTunnel,
+            NewBucket,
             RecordForm,
             HttpTest,
             BindingEdit,
@@ -534,6 +573,7 @@ impl App {
             Popup::AccountPicker(_) => Kind::Account,
             Popup::Help(_) => Kind::Help,
             Popup::NewTunnel(_) => Kind::NewTunnel,
+            Popup::NewBucket(_) => Kind::NewBucket,
             Popup::RecordForm(_) => Kind::RecordForm,
             Popup::HttpTest(_) => Kind::HttpTest,
             Popup::BindingEdit(_) => Kind::BindingEdit,
@@ -655,6 +695,33 @@ impl App {
                 _ => {
                     if let Some(Popup::NewTunnel(t)) = self.popup.as_mut() {
                         edit_input(&mut t.name, key.code);
+                    }
+                    None
+                }
+            },
+            Kind::NewBucket => match key.code {
+                KeyCode::Esc => {
+                    self.popup = None;
+                    None
+                }
+                KeyCode::Enter => {
+                    let name = match self.popup.as_ref() {
+                        Some(Popup::NewBucket(b)) => b.name.value().trim().to_string(),
+                        _ => String::new(),
+                    };
+                    if name.is_empty() {
+                        if let Some(Popup::NewBucket(b)) = self.popup.as_mut() {
+                            b.error = Some("El nombre es obligatorio".into());
+                        }
+                        None
+                    } else {
+                        self.popup = None;
+                        Some(Action::CreateBucket(name))
+                    }
+                }
+                _ => {
+                    if let Some(Popup::NewBucket(b)) = self.popup.as_mut() {
+                        edit_input(&mut b.name, key.code);
                     }
                     None
                 }
@@ -863,10 +930,12 @@ impl App {
                     self.workers.reset();
                     self.workers.set_subdomain(None);
                     self.d1.reset();
+                    self.r2.reset();
                     match self.sidebar.module() {
                         Module::Tunnels => self.load_tunnels(),
                         Module::Workers => self.load_workers(),
                         Module::D1 => self.load_databases(),
+                        Module::R2 => self.load_buckets(),
                         _ => {}
                     }
                 }
@@ -1100,6 +1169,27 @@ impl App {
             Action::D1Error(e) => {
                 self.d1.loading = false;
                 self.d1.error = Some(e.clone());
+                self.status = format!("Error: {e}");
+            }
+
+            Action::R2BucketsLoaded(buckets) => {
+                self.r2.set_buckets(buckets);
+                if let Some(name) = self.r2.selected_name() {
+                    self.load_bucket_info(name);
+                }
+            }
+            Action::R2InfoLoaded { bucket, info } => {
+                self.r2.set_info(&bucket, info.map(|b| *b));
+            }
+            Action::CreateBucket(name) => self.spawn_create_bucket(name),
+            Action::DeleteBucket(name) => self.spawn_delete_bucket(name),
+            Action::R2Mutated(msg) => {
+                self.status = msg;
+                self.load_buckets();
+            }
+            Action::R2Error(e) => {
+                self.r2.loading = false;
+                self.r2.error = Some(e.clone());
                 self.status = format!("Error: {e}");
             }
         }
@@ -1940,6 +2030,118 @@ impl App {
         });
     }
 
+    // --- R2 ---
+
+    fn change_bucket(&mut self, delta: i32) {
+        if self.r2.select(delta)
+            && let Some(name) = self.r2.selected_name()
+        {
+            self.load_bucket_info(name);
+        }
+    }
+
+    fn open_new_bucket(&mut self) {
+        self.popup = Some(Popup::NewBucket(NewBucket::default()));
+    }
+
+    fn confirm_delete_bucket(&mut self) {
+        let Some(name) = self.r2.selected_name() else {
+            return;
+        };
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Borrar bucket".into(),
+            body: format!("¿Borrar el bucket {name}? Debe estar vacío."),
+            on_yes: Action::DeleteBucket(name),
+        }));
+    }
+
+    fn load_buckets(&mut self) {
+        let (Some(client), Some(account_id)) =
+            (self.client.clone(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        self.r2.loading = true;
+        self.r2.error = None;
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let action = match client.list_buckets(&account_id).await {
+                Ok(buckets) => Action::R2BucketsLoaded(buckets),
+                Err(e) => Action::R2Error(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    /// Carga detalle + uso + dominios del bucket en una sola tarea.
+    fn load_bucket_info(&mut self, name: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client.clone(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        self.r2.begin_info(name.clone());
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let info = match client.bucket_detail(&account_id, &name).await {
+                Ok(detail) => {
+                    let usage = client
+                        .bucket_usage(&account_id, &name)
+                        .await
+                        .unwrap_or_default();
+                    let domains = client
+                        .bucket_domains(&account_id, &name)
+                        .await
+                        .unwrap_or_default();
+                    Some(Box::new(BucketInfo {
+                        detail,
+                        usage,
+                        domains,
+                    }))
+                }
+                Err(e) => {
+                    tracing::debug!("detalle bucket {name}: {e}");
+                    None
+                }
+            };
+            let _ = tx.send(Action::R2InfoLoaded { bucket: name, info });
+        });
+    }
+
+    fn spawn_create_bucket(&mut self, name: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client.clone(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Creando bucket…".into();
+        tokio::spawn(async move {
+            let action = match client.create_bucket(&account_id, &name).await {
+                Ok(()) => Action::R2Mutated(format!("Bucket '{name}' creado")),
+                Err(e) => Action::R2Error(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn spawn_delete_bucket(&mut self, name: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client.clone(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Borrando bucket…".into();
+        tokio::spawn(async move {
+            let action = match client.delete_bucket(&account_id, &name).await {
+                Ok(()) => Action::R2Mutated(format!("Bucket '{name}' borrado")),
+                Err(e) => Action::R2Error(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
     // --- Foco ---
 
     fn panes(&self) -> &'static [Focus] {
@@ -1953,12 +2155,14 @@ impl App {
             Focus::D1Editor,
             Focus::D1Results,
         ];
+        static R2_PANES: &[Focus] = &[Focus::Modules, Focus::R2Buckets];
         static BASE_PANES: &[Focus] = &[Focus::Modules];
         match self.sidebar.module() {
             Module::Dns => DNS_PANES,
             Module::Tunnels => TUNNEL_PANES,
             Module::Workers => WORKER_PANES,
             Module::D1 => D1_PANES,
+            Module::R2 => R2_PANES,
             _ => BASE_PANES,
         }
     }
@@ -2062,6 +2266,15 @@ impl App {
                     ("PageUp/PageDown", "desplazar de 10 en 10"),
                 ],
             ),
+            Focus::R2Buckets => HelpSection::new(
+                "Buckets R2",
+                vec![
+                    ("↑ ↓ / k j", "navegar buckets (uso/dominios)"),
+                    ("n", "nuevo bucket"),
+                    ("d", "borrar bucket (con confirmación)"),
+                    ("r", "recargar buckets"),
+                ],
+            ),
         });
         Help { sections }
     }
@@ -2082,6 +2295,7 @@ impl App {
         self.rect_d1_tables = None;
         self.rect_d1_editor = None;
         self.rect_d1_results = None;
+        self.rect_r2 = None;
 
         self.sidebar.draw(
             frame,
@@ -2131,6 +2345,13 @@ impl App {
                 self.rect_d1_editor = Some(editor_area);
                 self.rect_d1_results = Some(result_area);
             }
+            Module::R2 if main_active => {
+                let (list_area, detail_area) = crate::components::r2::split(shell.main);
+                self.r2
+                    .draw_list(frame, list_area, self.focus == Focus::R2Buckets);
+                self.r2.draw_detail(frame, detail_area);
+                self.rect_r2 = Some(list_area);
+            }
             _ => {
                 self.detail.draw(
                     frame,
@@ -2179,6 +2400,7 @@ impl App {
                 Focus::D1Tables => "↑↓ tabla · Enter SELECT * · Tab → editor · r · ?".into(),
                 Focus::D1Editor => "escribe SQL · F5/Ctrl+Enter ejecutar · Tab → · ?".into(),
                 Focus::D1Results => "↑↓ scroll · PgUp/PgDn · Tab → · ? ayuda".into(),
+                Focus::R2Buckets => "↑↓ bucket · n nuevo · d borrar · r · A · ? ayuda".into(),
             }
         };
         (left, right)

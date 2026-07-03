@@ -1,9 +1,10 @@
 //! Intenciones de alto nivel. Los componentes y las tareas async (resultados
 //! de red) emiten `Action`; `app.rs` las enruta en `dispatch`.
 
+use crate::components::r2::BucketInfo;
 use crate::model::{
-    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, QueryOutcome, Tunnel,
-    WorkerMetrics, WorkerScript, Zone,
+    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, QueryOutcome, R2Bucket,
+    Tunnel, WorkerMetrics, WorkerScript, Zone,
 };
 
 #[derive(Debug, Clone)]
@@ -173,4 +174,21 @@ pub enum Action {
     },
     /// Error al listar bases D1.
     D1Error(String),
+
+    // --- R2 (Fase 6) ---
+    /// Buckets cargados.
+    R2BucketsLoaded(Vec<R2Bucket>),
+    /// Detalle + uso + dominios de un bucket (`None` = error).
+    R2InfoLoaded {
+        bucket: String,
+        info: Option<Box<BucketInfo>>,
+    },
+    /// Crear un bucket con este nombre.
+    CreateBucket(String),
+    /// Borrar un bucket.
+    DeleteBucket(String),
+    /// Mutación de bucket OK: fija estado y recarga la lista.
+    R2Mutated(String),
+    /// Error en una operación de R2.
+    R2Error(String),
 }

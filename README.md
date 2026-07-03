@@ -27,8 +27,6 @@ Cómo obtenerlo: dashboard de Cloudflare → *My Profile → API Tokens → Crea
 Token scoped recomendado: **Account** (Workers, D1, Queues, Cloudflare Tunnel, Analytics) +
 **Zone** (DNS, Cache Purge, Zone Read, Analytics). R2 (objetos) requiere un token R2 aparte.
 
-El token se guarda en el **keyring del OS**, nunca en texto plano. Como alternativa (útil en
-CI/headless) se puede exportar como variable de entorno:
 
 ```sh
 export CLOUDFLARE_API_TOKEN="<tu-token>"
