@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+// Shim: lanza el binario real descargado por install.js (lazycf-bin).
+// Así el campo "bin" siempre apunta a un archivo que existe en el paquete
+// y funciona igual en Linux/macOS/Windows.
+const { spawnSync } = require('child_process');
+const path = require('path');
+
+const real = path.join(
+  __dirname,
+  process.platform === 'win32' ? 'lazycf-bin.exe' : 'lazycf-bin'
+);
+
+const result = spawnSync(real, process.argv.slice(2), { stdio: 'inherit' });
+if (result.error) {
+  console.error('❌ No se encontró el binario de LazyCF. Reinstala con: npm install -g lazycf');
+  console.error(String(result.error.message || result.error));
+  process.exit(1);
+}
+process.exit(result.status ?? 0);
