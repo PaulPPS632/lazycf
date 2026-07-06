@@ -30,11 +30,13 @@ pub enum Action {
     /// Abrir el modal de ayuda con todos los atajos.
     OpenHelp,
 
-    // --- Cuentas ---
+    // --- Cuentas / sesiones (multi-token) ---
     /// Abrir el selector de cuenta.
     OpenAccountPicker,
-    /// Cambiar a la cuenta con este índice.
-    SwitchAccount(usize),
+    /// Cambiar a la cuenta `account` de la sesión (token) `session`.
+    SwitchTo { session: usize, account: usize },
+    /// Eliminar el token de la sesión `session` (tras confirmación).
+    DeleteToken(usize),
 
     // --- DNS ---
     /// Zonas cargadas.

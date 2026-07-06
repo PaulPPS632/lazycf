@@ -16,7 +16,8 @@ use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, BindingEdit, Confirm, Help, HelpSection, HttpTest, ImageView, Message,
+    AccountPicker, AccountRow, BindingEdit, Confirm, Help, HelpSection, HttpTest, ImageView,
+    Message,
     NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, TokenEntry,
     UploadForm,
 };
@@ -52,6 +53,14 @@ enum Focus {
     R2Objects,
 }
 
+/// Un token verificado, con su cliente HTTP y sus cuentas visibles.
+/// Todas las sesiones conviven; solo una (cuenta) está activa a la vez.
+struct Session {
+    token: String,
+    client: CfClient,
+    accounts: Vec<Account>,
+}
+
 pub struct App {
     running: bool,
     screen: Screen,
@@ -60,11 +69,13 @@ pub struct App {
     action_tx: UnboundedSender<Action>,
     action_rx: UnboundedReceiver<Action>,
 
-    // Sesión y cuentas.
-    client: Option<CfClient>,
-    config: Config,
-    accounts: Vec<Account>,
+    // Sesiones (multi-token) y cuenta activa.
+    sessions: Vec<Session>,
+    active_session: usize,
     active_account: usize,
+    /// Verificaciones de token en vuelo (arranque / añadir).
+    pending_verifications: usize,
+    config: Config,
     status: String,
 
     // DNS.
@@ -120,10 +131,11 @@ impl App {
             events,
             action_tx,
             action_rx,
-            client: None,
-            config,
-            accounts: Vec::new(),
+            sessions: Vec::new(),
+            active_session: 0,
             active_account: 0,
+            pending_verifications: 0,
+            config,
             status: String::new(),
             all_zones: Vec::new(),
             dns: DnsView::new(),
@@ -150,17 +162,20 @@ impl App {
             rect_r2_objects: None,
         };
 
-        match secrets::load_token() {
-            Ok(Some(token)) => {
-                app.status = "Verificando token…".into();
+        match secrets::load_tokens() {
+            Ok(tokens) if !tokens.is_empty() => {
+                app.status = format!("Verificando {} token(s)…", tokens.len());
                 app.popup = Some(Popup::Token(TokenEntry {
-                    input: TextInput::new(token.clone()),
+                    input: TextInput::default(),
                     verifying: true,
                     error: None,
                 }));
-                app.spawn_verify(token);
+                app.pending_verifications = tokens.len();
+                for token in tokens {
+                    app.spawn_verify(token);
+                }
             }
-            Ok(None) => {
+            Ok(_) => {
                 app.status = "Introduce tu API token de Cloudflare".into();
                 app.popup = Some(Popup::Token(TokenEntry::default()));
             }
@@ -175,6 +190,23 @@ impl App {
         }
 
         Ok(app)
+    }
+
+    // --- Sesiones ---
+
+    /// Cliente HTTP de la sesión activa.
+    fn client(&self) -> Option<CfClient> {
+        self.sessions
+            .get(self.active_session)
+            .map(|s| s.client.clone())
+    }
+
+    /// Persiste todos los tokens de las sesiones en el keyring.
+    fn persist_tokens(&self) {
+        let tokens: Vec<String> = self.sessions.iter().map(|s| s.token.clone()).collect();
+        if let Err(e) = secrets::save_tokens(&tokens) {
+            tracing::warn!("no se pudieron guardar los tokens en el keyring: {e}");
+        }
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
@@ -721,7 +753,45 @@ impl App {
                         p.move_by(1);
                         None
                     }
-                    KeyCode::Enter => Some(Action::SwitchAccount(p.selected())),
+                    KeyCode::Enter => {
+                        // Fila "(sin cuentas)" no es seleccionable como activa.
+                        let row = p.selected_row()?;
+                        if row.account == usize::MAX {
+                            return None;
+                        }
+                        Some(Action::SwitchTo {
+                            session: row.session,
+                            account: row.account,
+                        })
+                    }
+                    // Añadir un token nuevo: abre la entrada de token encima.
+                    KeyCode::Char('a') => {
+                        self.popup = Some(Popup::Token(TokenEntry::default()));
+                        None
+                    }
+                    // Eliminar el token de la fila seleccionada (con confirmación).
+                    KeyCode::Char('d' | 'x') => {
+                        let row = p.selected_row()?;
+                        let session = row.session;
+                        let suffix = self
+                            .sessions
+                            .get(session)
+                            .map(|s| mask_token(&s.token))
+                            .unwrap_or_default();
+                        let n = self
+                            .sessions
+                            .get(session)
+                            .map(|s| s.accounts.len())
+                            .unwrap_or(0);
+                        self.popup = Some(Popup::Confirm(Confirm {
+                            title: "Eliminar token".into(),
+                            body: format!(
+                                "¿Eliminar el token {suffix} y sus {n} cuenta(s) de lazycf?\n(No borra nada en Cloudflare.)"
+                            ),
+                            on_yes: Action::DeleteToken(session),
+                        }));
+                        None
+                    }
                     KeyCode::Esc => {
                         self.popup = None;
                         None
@@ -1027,40 +1097,72 @@ impl App {
                 self.spawn_verify(token);
             }
             Action::TokenVerified { token, accounts } => {
-                match secrets::save_token(&token) {
-                    Ok(()) => self.status = "Autenticado".into(),
-                    Err(e) => {
-                        tracing::warn!("no se pudo guardar el token en el keyring: {e}");
-                        self.status = "Autenticado (token no persistido en keyring)".into();
+                self.pending_verifications = self.pending_verifications.saturating_sub(1);
+                if self.sessions.iter().any(|s| s.token == token) {
+                    self.status = "Ese token ya está añadido".into();
+                    if self.screen == Screen::Main
+                        && matches!(self.popup, Some(Popup::Token(_)))
+                    {
+                        self.popup = None;
+                    }
+                } else if let Ok(client) = CfClient::new(token.clone()) {
+                    let n = accounts.len();
+                    self.sessions.push(Session {
+                        token,
+                        client,
+                        accounts,
+                    });
+                    self.persist_tokens();
+                    if self.screen == Screen::Auth {
+                        // Primera sesión válida → entrar a la app.
+                        let si = self.sessions.len() - 1;
+                        self.active_session = si;
+                        self.active_account = self
+                            .config
+                            .default_account_id
+                            .as_ref()
+                            .and_then(|id| {
+                                self.sessions[si].accounts.iter().position(|a| &a.id == id)
+                            })
+                            .unwrap_or(0);
+                        self.screen = Screen::Main;
+                        self.popup = None;
+                        self.status = "Autenticado".into();
+                        self.load_zones();
+                    } else {
+                        // Token añadido desde el selector: reabrirlo actualizado.
+                        self.status = format!("Token añadido ({n} cuenta(s))");
+                        self.open_account_picker();
                     }
                 }
-                self.client = CfClient::new(token).ok();
-                self.accounts = accounts;
-                self.active_account = self
-                    .config
-                    .default_account_id
-                    .as_ref()
-                    .and_then(|id| self.accounts.iter().position(|a| &a.id == id))
-                    .unwrap_or(0);
-                self.screen = Screen::Main;
-                self.popup = None;
-                self.load_zones();
             }
             Action::AuthFailed(msg) => {
-                self.screen = Screen::Auth;
-                self.status = "Fallo de autenticación".into();
-                match self.popup.as_mut() {
-                    Some(Popup::Token(entry)) => {
-                        entry.verifying = false;
-                        entry.error = Some(msg);
+                self.pending_verifications = self.pending_verifications.saturating_sub(1);
+                // Solo bloquea si no queda ninguna sesión válida ni verificación en vuelo.
+                if self.sessions.is_empty() && self.pending_verifications == 0 {
+                    self.screen = Screen::Auth;
+                    self.status = "Fallo de autenticación".into();
+                    match self.popup.as_mut() {
+                        Some(Popup::Token(entry)) => {
+                            entry.verifying = false;
+                            entry.error = Some(msg);
+                        }
+                        _ => {
+                            self.popup = Some(Popup::Token(TokenEntry {
+                                input: TextInput::default(),
+                                verifying: false,
+                                error: Some(msg),
+                            }));
+                        }
                     }
-                    _ => {
-                        self.popup = Some(Popup::Token(TokenEntry {
-                            input: TextInput::default(),
-                            verifying: false,
-                            error: Some(msg),
-                        }));
-                    }
+                } else if self.screen == Screen::Main
+                    && let Some(Popup::Token(entry)) = self.popup.as_mut()
+                {
+                    // Fallo al añadir un token desde el selector.
+                    entry.verifying = false;
+                    entry.error = Some(msg);
+                } else {
+                    self.status = format!("Token inválido: {msg}");
                 }
             }
             Action::OpenTokenPage => match crate::browser::open(crate::browser::TOKEN_PAGE) {
@@ -1072,26 +1174,85 @@ impl App {
             },
             Action::OpenHelp => self.popup = Some(Popup::Help(self.build_help())),
 
-            Action::OpenAccountPicker => {
-                if !self.accounts.is_empty() {
-                    self.popup = Some(Popup::AccountPicker(AccountPicker::new(
-                        self.accounts.clone(),
-                        self.active_account,
-                    )));
+            Action::OpenAccountPicker => self.open_account_picker(),
+            Action::SwitchTo { session, account } => {
+                self.popup = None;
+                let valid = self
+                    .sessions
+                    .get(session)
+                    .is_some_and(|s| account < s.accounts.len());
+                if !valid {
+                    return;
+                }
+                if session == self.active_session && account == self.active_account {
+                    return; // ya activa
+                }
+                let session_changed = session != self.active_session;
+                self.active_session = session;
+                self.active_account = account;
+                self.status = format!(
+                    "Cuenta: {}",
+                    self.sessions[session].accounts[account].name
+                );
+                // Recursos account-scoped: resetear y recargar si procede.
+                self.stop_tail();
+                self.tunnels.reset();
+                self.workers.reset();
+                self.workers.set_subdomain(None);
+                self.d1.reset();
+                self.r2.reset();
+                if session_changed {
+                    // Las zonas pertenecen al token: recargar con el nuevo cliente.
+                    self.all_zones.clear();
+                    self.load_zones();
+                } else {
+                    self.apply_account_filter();
+                }
+                match self.sidebar.module() {
+                    Module::Tunnels => self.load_tunnels(),
+                    Module::Workers => self.load_workers(),
+                    Module::D1 => self.load_databases(),
+                    Module::R2 => self.load_buckets(),
+                    _ => {}
                 }
             }
-            Action::SwitchAccount(i) => {
-                if i < self.accounts.len() {
-                    self.active_account = i;
-                    self.status = format!("Cuenta: {}", self.accounts[i].name);
-                    self.apply_account_filter();
-                    // Recursos account-scoped: resetear y recargar si procede.
+            Action::DeleteToken(session) => {
+                if session >= self.sessions.len() {
+                    return;
+                }
+                self.sessions.remove(session);
+                self.persist_tokens();
+                if self.sessions.is_empty() {
+                    // Sin tokens: volver a la pantalla de autenticación.
+                    self.active_session = 0;
+                    self.active_account = 0;
+                    self.stop_tail();
+                    self.all_zones.clear();
+                    self.dns = DnsView::new();
+                    self.tunnels.reset();
+                    self.workers.reset();
+                    self.d1.reset();
+                    self.r2.reset();
+                    self.screen = Screen::Auth;
+                    self.status = "Sin tokens · introduce uno nuevo".into();
+                    self.popup = Some(Popup::Token(TokenEntry::default()));
+                    return;
+                }
+                let active_removed = self.active_session == session;
+                if self.active_session > session {
+                    self.active_session -= 1;
+                } else if active_removed {
+                    // La sesión activa se borró: pasar a la primera restante.
+                    self.active_session = 0;
+                    self.active_account = 0;
                     self.stop_tail();
                     self.tunnels.reset();
                     self.workers.reset();
                     self.workers.set_subdomain(None);
                     self.d1.reset();
                     self.r2.reset();
+                    self.all_zones.clear();
+                    self.load_zones();
                     match self.sidebar.module() {
                         Module::Tunnels => self.load_tunnels(),
                         Module::Workers => self.load_workers(),
@@ -1100,7 +1261,8 @@ impl App {
                         _ => {}
                     }
                 }
-                self.popup = None;
+                self.status = "Token eliminado".into();
+                self.open_account_picker();
             }
 
             Action::ZonesLoaded(zones) => {
@@ -1421,7 +1583,45 @@ impl App {
     // --- Cuentas / zonas ---
 
     fn active_account_id(&self) -> Option<&str> {
-        self.accounts.get(self.active_account).map(|a| a.id.as_str())
+        self.sessions
+            .get(self.active_session)?
+            .accounts
+            .get(self.active_account)
+            .map(|a| a.id.as_str())
+    }
+
+    fn active_account_name(&self) -> &str {
+        self.sessions
+            .get(self.active_session)
+            .and_then(|s| s.accounts.get(self.active_account))
+            .map(|a| a.name.as_str())
+            .unwrap_or("")
+    }
+
+    /// Abre el selector con todas las cuentas de todos los tokens.
+    fn open_account_picker(&mut self) {
+        let mut rows = Vec::new();
+        for (si, s) in self.sessions.iter().enumerate() {
+            let suffix = mask_token(&s.token);
+            if s.accounts.is_empty() {
+                // Token sin cuentas visibles: fila para poder eliminarlo.
+                rows.push(AccountRow {
+                    label: format!("(sin cuentas) · {suffix}"),
+                    session: si,
+                    account: usize::MAX,
+                    active: false,
+                });
+            }
+            for (ai, a) in s.accounts.iter().enumerate() {
+                rows.push(AccountRow {
+                    label: format!("{} · {suffix}", a.name),
+                    session: si,
+                    account: ai,
+                    active: si == self.active_session && ai == self.active_account,
+                });
+            }
+        }
+        self.popup = Some(Popup::AccountPicker(AccountPicker::new(rows)));
     }
 
     /// Filtra `all_zones` por la cuenta activa y carga los registros de la primera.
@@ -1545,7 +1745,7 @@ impl App {
     }
 
     fn load_zones(&mut self) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.client() else {
             return;
         };
         self.dns.loading_zones = true;
@@ -1561,7 +1761,7 @@ impl App {
     }
 
     fn load_records(&mut self, zone_id: String) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.client() else {
             return;
         };
         self.dns.begin_loading_records();
@@ -1576,7 +1776,7 @@ impl App {
     }
 
     fn toggle_proxy(&mut self) {
-        let (Some(client), Some(zone_id)) = (self.client.clone(), self.dns.selected_zone_id())
+        let (Some(client), Some(zone_id)) = (self.client(), self.dns.selected_zone_id())
         else {
             return;
         };
@@ -1608,7 +1808,7 @@ impl App {
     }
 
     fn spawn_delete(&mut self, zone_id: String, record_id: String) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.client() else {
             return;
         };
         let tx = self.action_tx.clone();
@@ -1634,7 +1834,7 @@ impl App {
         proxied: bool,
         priority: String,
     ) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.client() else {
             return;
         };
         let tx = self.action_tx.clone();
@@ -1682,7 +1882,7 @@ impl App {
     }
 
     fn spawn_purge(&mut self, zone_id: String) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.client() else {
             return;
         };
         let tx = self.action_tx.clone();
@@ -1732,7 +1932,7 @@ impl App {
 
     fn load_tunnels(&mut self) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1750,7 +1950,7 @@ impl App {
 
     fn load_ingress(&mut self, tunnel_id: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1771,7 +1971,7 @@ impl App {
 
     fn spawn_create_tunnel(&mut self, name: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1791,7 +1991,7 @@ impl App {
 
     fn spawn_cleanup(&mut self, tunnel_id: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1808,7 +2008,7 @@ impl App {
 
     fn spawn_delete_tunnel(&mut self, tunnel_id: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1911,7 +2111,7 @@ impl App {
 
     fn load_workers(&mut self) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1931,7 +2131,7 @@ impl App {
 
     fn load_metrics(&mut self, script: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1958,7 +2158,7 @@ impl App {
 
     fn load_deployments(&mut self, script: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -1972,7 +2172,7 @@ impl App {
 
     fn load_bindings(&mut self, script: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2000,7 +2200,7 @@ impl App {
     /// Un `oneshot` corta el bucle; al salir cierra el WS y borra la sesión.
     fn spawn_tail(&mut self, script: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2092,7 +2292,7 @@ impl App {
         _adding: bool,
     ) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2193,7 +2393,7 @@ impl App {
 
     fn load_databases(&mut self) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2211,7 +2411,7 @@ impl App {
 
     fn load_tables(&mut self, db_id: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2233,7 +2433,7 @@ impl App {
 
     fn spawn_d1_query(&mut self, db_id: String, title: String, sql: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2268,7 +2468,7 @@ impl App {
     /// Lista los objetos del bucket seleccionado bajo el prefijo actual.
     fn load_objects(&mut self) {
         let (Some(client), Some(account_id), Some(bucket)) = (
-            self.client.clone(),
+            self.client(),
             self.active_account_id().map(String::from),
             self.r2.selected_name(),
         ) else {
@@ -2323,7 +2523,7 @@ impl App {
 
     fn spawn_upload(&mut self, path: String) {
         let (Some(client), Some(account_id), Some(bucket)) = (
-            self.client.clone(),
+            self.client(),
             self.active_account_id().map(String::from),
             self.r2.selected_name(),
         ) else {
@@ -2365,7 +2565,7 @@ impl App {
             return;
         };
         let (Some(client), Some(account_id), Some(bucket)) = (
-            self.client.clone(),
+            self.client(),
             self.active_account_id().map(String::from),
             self.r2.selected_name(),
         ) else {
@@ -2422,7 +2622,7 @@ impl App {
 
     fn spawn_delete_object(&mut self, key: String) {
         let (Some(client), Some(account_id), Some(bucket)) = (
-            self.client.clone(),
+            self.client(),
             self.active_account_id().map(String::from),
             self.r2.selected_name(),
         ) else {
@@ -2504,7 +2704,7 @@ impl App {
             return;
         }
         let (Some(client), Some(account_id), Some(bucket)) = (
-            self.client.clone(),
+            self.client(),
             self.active_account_id().map(String::from),
             self.r2.selected_name(),
         ) else {
@@ -2539,7 +2739,7 @@ impl App {
 
     fn load_buckets(&mut self) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2558,7 +2758,7 @@ impl App {
     /// Carga detalle + uso + dominios del bucket en una sola tarea.
     fn load_bucket_info(&mut self, name: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2592,7 +2792,7 @@ impl App {
 
     fn spawn_create_bucket(&mut self, name: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2609,7 +2809,7 @@ impl App {
 
     fn spawn_delete_bucket(&mut self, name: String) {
         let (Some(client), Some(account_id)) =
-            (self.client.clone(), self.active_account_id().map(String::from))
+            (self.client(), self.active_account_id().map(String::from))
         else {
             return;
         };
@@ -2872,11 +3072,17 @@ impl App {
     }
 
     fn status_line(&self) -> (String, String) {
-        let acc = self
-            .accounts
-            .get(self.active_account)
-            .map(|a| a.name.as_str())
-            .unwrap_or("");
+        // Con varios tokens, añade el sufijo del token para distinguir cuentas.
+        let acc = if self.sessions.len() > 1 {
+            let suffix = self
+                .sessions
+                .get(self.active_session)
+                .map(|s| mask_token(&s.token))
+                .unwrap_or_default();
+            format!("{} {suffix}", self.active_account_name())
+        } else {
+            self.active_account_name().to_string()
+        };
         let left = if self.status.is_empty() {
             acc.to_string()
         } else if acc.is_empty() {
@@ -2914,6 +3120,19 @@ impl App {
 /// Entrecomilla un identificador SQL (tabla) escapando comillas dobles.
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// Sufijo legible de un token para distinguirlo sin exponerlo (`····abcd`).
+fn mask_token(token: &str) -> String {
+    let tail: String = token
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("····{tail}")
 }
 
 /// Aplica una tecla de edición estándar (←→ Inicio/Fin Supr Retroceso, texto) a un input.

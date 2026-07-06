@@ -1,48 +1,71 @@
-//! Almacenamiento del API token de Cloudflare.
+//! Almacenamiento de los API tokens de Cloudflare (multi-cuenta).
 //!
-//! Prioridad de lectura: variable de entorno `CLOUDFLARE_API_TOKEN` (útil en
-//! CI/headless) y, si no está, el keychain del OS (Secret Service en Linux).
-//! Nunca se guarda en texto plano en disco.
+//! Se guarda una lista JSON de tokens en una entrada del keychain del OS
+//! (Secret Service en Linux). `CLOUDFLARE_API_TOKEN` (env) se añade además,
+//! sin persistirse. Nunca se guarda en texto plano en disco. La entrada
+//! antigua de un solo token se migra automáticamente a la lista.
 
 use color_eyre::eyre::{Result, WrapErr};
 
 const SERVICE: &str = "lazycf";
-const ACCOUNT: &str = "cloudflare-api-token";
+/// Entrada nueva: JSON `["token1", "token2", …]`.
+const TOKENS_ACCOUNT: &str = "cloudflare-api-tokens";
+/// Entrada legacy (un solo token) — se migra y se elimina al cargar.
+const LEGACY_ACCOUNT: &str = "cloudflare-api-token";
 const ENV_VAR: &str = "CLOUDFLARE_API_TOKEN";
 
-fn entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, ACCOUNT).wrap_err("abriendo entrada del keyring")
+fn tokens_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, TOKENS_ACCOUNT).wrap_err("abriendo entrada del keyring")
 }
 
-/// Carga el token: primero env var, luego keyring. `None` si no hay ninguno.
-pub fn load_token() -> Result<Option<String>> {
+fn legacy_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, LEGACY_ACCOUNT).wrap_err("abriendo entrada del keyring")
+}
+
+/// Carga todos los tokens: env var (primero, sin persistir) + keyring.
+/// Migra la entrada legacy de un solo token a la lista si existe.
+pub fn load_tokens() -> Result<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+
     if let Ok(token) = std::env::var(ENV_VAR) {
         let token = token.trim().to_string();
         if !token.is_empty() {
-            return Ok(Some(token));
+            tokens.push(token);
         }
     }
-    match entry()?.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e).wrap_err("leyendo token del keyring"),
+
+    // Lista nueva (JSON).
+    match tokens_entry()?.get_password() {
+        Ok(json) => {
+            let stored: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+            for t in stored {
+                if !tokens.contains(&t) {
+                    tokens.push(t);
+                }
+            }
+        }
+        Err(keyring::Error::NoEntry) => {
+            // Migración desde la entrada de un solo token.
+            if let Ok(legacy) = legacy_entry()?.get_password() {
+                if !tokens.contains(&legacy) {
+                    tokens.push(legacy.clone());
+                }
+                save_tokens(std::slice::from_ref(&legacy))?;
+                let _ = legacy_entry()?.delete_credential();
+            }
+        }
+        Err(e) => return Err(e).wrap_err("leyendo tokens del keyring"),
     }
+
+    Ok(tokens)
 }
 
-/// Guarda el token en el keychain del OS.
-pub fn save_token(token: &str) -> Result<()> {
-    entry()?
-        .set_password(token)
-        .wrap_err("guardando token en el keyring")
-}
-
-/// Borra el token del keychain. No falla si no existía.
-#[allow(dead_code)] // usado por el comando "logout" (fase posterior)
-pub fn delete_token() -> Result<()> {
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e).wrap_err("borrando token del keyring"),
-    }
+/// Persiste la lista de tokens en el keychain (JSON).
+pub fn save_tokens(tokens: &[String]) -> Result<()> {
+    let json = serde_json::to_string(tokens).wrap_err("serializando tokens")?;
+    tokens_entry()?
+        .set_password(&json)
+        .wrap_err("guardando tokens en el keyring")
 }
 
 // --- Credenciales R2 (Access Key + Secret para URLs prefirmadas S3) ---

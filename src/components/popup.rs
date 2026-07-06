@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::action::Action;
 use crate::components::input::TextInput;
-use crate::model::{Account, Binding, DnsRecord};
+use crate::model::{Binding, DnsRecord};
 use crate::ui::{layout, theme};
 
 /// Popup activo.
@@ -352,20 +352,32 @@ pub struct Confirm {
     pub on_yes: Action,
 }
 
-/// Selector de cuenta activa.
+/// Fila del selector: una cuenta de una sesión (token) concreta.
+pub struct AccountRow {
+    pub label: String,
+    /// Índice de la sesión (token) dueña de la cuenta.
+    pub session: usize,
+    /// Índice de la cuenta dentro de la sesión.
+    pub account: usize,
+    /// `true` si es la cuenta activa actual.
+    pub active: bool,
+}
+
+/// Selector de cuenta activa (todas las cuentas de todos los tokens).
 pub struct AccountPicker {
-    pub accounts: Vec<Account>,
+    pub rows: Vec<AccountRow>,
     pub state: ListState,
 }
 
 impl AccountPicker {
-    pub fn new(accounts: Vec<Account>, active: usize) -> Self {
+    pub fn new(rows: Vec<AccountRow>) -> Self {
         let mut state = ListState::default();
-        state.select(Some(active.min(accounts.len().saturating_sub(1))));
-        Self { accounts, state }
+        let active = rows.iter().position(|r| r.active).unwrap_or(0);
+        state.select((!rows.is_empty()).then_some(active));
+        Self { rows, state }
     }
     pub fn move_by(&mut self, delta: i32) {
-        let len = self.accounts.len();
+        let len = self.rows.len();
         if len == 0 {
             return;
         }
@@ -373,8 +385,8 @@ impl AccountPicker {
         let n = len as i32;
         self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
     }
-    pub fn selected(&self) -> usize {
-        self.state.selected().unwrap_or(0)
+    pub fn selected_row(&self) -> Option<&AccountRow> {
+        self.state.selected().and_then(|i| self.rows.get(i))
     }
 }
 
@@ -899,21 +911,39 @@ fn draw_confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
 }
 
 fn draw_account_picker(frame: &mut Frame, area: Rect, p: &mut AccountPicker) {
-    let h = (p.accounts.len() as u16 + 4).clamp(6, 18);
-    let rect = layout::centered(area, 60, h);
+    let h = (p.rows.len() as u16 + 5).clamp(7, 20);
+    let rect = layout::centered(area, 68, h);
     frame.render_widget(Clear, rect);
     let items: Vec<ListItem> = p
-        .accounts
+        .rows
         .iter()
-        .map(|a| ListItem::new(a.name.clone()))
+        .map(|r| {
+            let marker = if r.active { "● " } else { "  " };
+            let style = if r.active {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                Style::default().fg(theme::FG)
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("{marker}{}", r.label),
+                style,
+            )))
+        })
         .collect();
+    let block = Block::bordered()
+        .title(" Cuentas ")
+        .title_bottom(" Enter cambiar · a añadir token · d borrar token · Esc ")
+        .border_style(theme::border(true))
+        .title_style(theme::title(true));
+    if p.rows.is_empty() {
+        let body = Paragraph::new("Sin cuentas · pulsa 'a' para añadir un token")
+            .block(block)
+            .style(Style::default().fg(theme::DIM));
+        frame.render_widget(body, rect);
+        return;
+    }
     let list = List::new(items)
-        .block(
-            Block::bordered()
-                .title(" Cuentas · Enter selecciona · Esc cierra ")
-                .border_style(theme::border(true))
-                .title_style(theme::title(true)),
-        )
+        .block(block)
         .highlight_style(theme::selection())
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, rect, &mut p.state);
