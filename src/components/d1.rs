@@ -4,9 +4,9 @@
 //! Las tablas salen de `sqlite_master`; los resultados de `POST .../raw`.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::components::input::TextInput;
@@ -44,8 +44,15 @@ pub struct D1View {
     sql: TextInput,
     pub running: bool,
     result: D1Panel,
-    /// Desplazamiento vertical de la tabla de resultados.
-    result_scroll: usize,
+    /// Celda seleccionada en la rejilla de resultados.
+    sel_row: usize,
+    sel_col: usize,
+    /// Desplazamiento de la rejilla (se autoajustan al renderizar).
+    row_offset: usize,
+    col_offset: usize,
+    /// Barra WHERE: cláusula de filtro y tabla que respalda el resultado.
+    where_input: TextInput,
+    filter_table: Option<String>,
 }
 
 impl D1View {
@@ -157,13 +164,13 @@ impl D1View {
     pub fn begin_result(&mut self) {
         self.result = D1Panel::Loading;
         self.running = true;
-        self.result_scroll = 0;
+        self.reset_cursor();
     }
 
     pub fn set_result(&mut self, title: String, outcome: QueryOutcome) {
         self.result = D1Panel::Ok { title, outcome };
         self.running = false;
-        self.result_scroll = 0;
+        self.reset_cursor();
     }
 
     pub fn set_result_error(&mut self, msg: String) {
@@ -171,12 +178,66 @@ impl D1View {
         self.running = false;
     }
 
-    pub fn scroll_result(&mut self, delta: i32) {
-        if let D1Panel::Ok { outcome, .. } = &self.result {
-            let max = outcome.rows.len() as i32;
-            let next = (self.result_scroll as i32 + delta).clamp(0, max.max(0));
-            self.result_scroll = next as usize;
+    fn reset_cursor(&mut self) {
+        self.sel_row = 0;
+        self.sel_col = 0;
+        self.row_offset = 0;
+        self.col_offset = 0;
+    }
+
+    fn outcome(&self) -> Option<&QueryOutcome> {
+        match &self.result {
+            D1Panel::Ok { outcome, .. } => Some(outcome),
+            _ => None,
         }
+    }
+
+    /// Mueve la celda seleccionada con clamp a las dimensiones de la tabla.
+    pub fn move_cell(&mut self, dr: i32, dc: i32) {
+        let Some(o) = self.outcome() else { return };
+        let (rows, cols) = (o.rows.len(), o.columns.len());
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        self.sel_row = (self.sel_row as i32 + dr).clamp(0, rows as i32 - 1) as usize;
+        self.sel_col = (self.sel_col as i32 + dc).clamp(0, cols as i32 - 1) as usize;
+    }
+
+    /// Mueve la fila seleccionada por páginas (PgUp/PgDn).
+    pub fn page_rows(&mut self, delta: i32) {
+        self.move_cell(delta, 0);
+    }
+
+    /// `(columna, valor)` de la celda seleccionada.
+    pub fn selected_cell_value(&self) -> Option<(String, String)> {
+        let o = self.outcome()?;
+        let col = o.columns.get(self.sel_col)?.clone();
+        let val = o.rows.get(self.sel_row)?.get(self.sel_col)?.clone();
+        Some((col, val))
+    }
+
+    /// Fila seleccionada como TSV (pegable en Excel/Sheets).
+    pub fn selected_row_tsv(&self) -> Option<String> {
+        let o = self.outcome()?;
+        Some(o.rows.get(self.sel_row)?.join("\t"))
+    }
+
+    // --- Barra WHERE ---
+
+    pub fn where_mut(&mut self) -> &mut TextInput {
+        &mut self.where_input
+    }
+
+    pub fn where_trimmed(&self) -> String {
+        self.where_input.value().trim().to_string()
+    }
+
+    pub fn filter_table(&self) -> Option<String> {
+        self.filter_table.clone()
+    }
+
+    pub fn set_filter_table(&mut self, table: Option<String>) {
+        self.filter_table = table;
     }
 
     // --- Render ---
@@ -269,7 +330,23 @@ impl D1View {
         frame.render_widget(Paragraph::new(Line::from(hint)), rows[1]);
     }
 
-    pub fn draw_result(&self, frame: &mut Frame, area: Rect, focused: bool) {
+    /// Barra WHERE: filtra los resultados de la tabla actual.
+    pub fn draw_where(&self, frame: &mut Frame, area: Rect, focused: bool) {
+        let block = panel(" WHERE ", focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let line = if self.filter_table.is_none() {
+            dim_line("(aplica al seleccionar una tabla)")
+        } else if self.where_input.is_empty() && !focused {
+            dim_line("Escribe una cláusula WHERE para filtrar · Enter aplica")
+        } else {
+            Line::from(self.where_input.spans(focused))
+        };
+        frame.render_widget(Paragraph::new(line), inner);
+    }
+
+    pub fn draw_result(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let title = match &self.result {
             D1Panel::Ok { title, .. } => format!(" {title} "),
             _ => " Resultado ".to_string(),
@@ -294,68 +371,96 @@ impl D1View {
                     .wrap(Wrap { trim: true }),
                 inner,
             ),
+            // Rejilla estilo Excel + navegación de celda. Borrows disjuntos:
+            // `outcome` toma `self.result`; los offsets son campos distintos.
             D1Panel::Ok { outcome, .. } => {
-                self.draw_outcome(frame, inner, outcome);
-            }
-        }
-    }
+                let parts = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(0), Constraint::Length(1)])
+                    .split(inner);
+                let grid_area = parts[0];
 
-    fn draw_outcome(&self, frame: &mut Frame, area: Rect, o: &QueryOutcome) {
-        let rows_area = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(area);
-
-        if o.columns.is_empty() {
-            frame.render_widget(
-                Paragraph::new(dim_line("(sin filas)")).wrap(Wrap { trim: true }),
-                rows_area[0],
-            );
-        } else {
-            // Ancho por columna = máx(cabecera, celdas), acotado.
-            let ncols = o.columns.len();
-            let mut w: Vec<usize> = o.columns.iter().map(|c| c.chars().count()).collect();
-            for row in &o.rows {
-                for (i, cell) in row.iter().enumerate().take(ncols) {
-                    w[i] = w[i].max(cell.chars().count());
+                if outcome.columns.is_empty() {
+                    frame.render_widget(
+                        Paragraph::new(dim_line("(sin filas)")).wrap(Wrap { trim: true }),
+                        grid_area,
+                    );
+                    let sum = Span::styled(outcome.summary(), Style::default().fg(theme::DIM));
+                    frame.render_widget(Paragraph::new(Line::from(sum)), parts[1]);
+                    return;
                 }
+
+                let w = col_widths(outcome);
+                let nrows = outcome.rows.len();
+                let ncols = outcome.columns.len();
+
+                // Filas visibles (cada fila = contenido + regla; +2 cabecera/regla).
+                let vis_rows = ((grid_area.height as usize).saturating_sub(2) / 2).max(1);
+                if self.sel_row < self.row_offset {
+                    self.row_offset = self.sel_row;
+                } else if self.sel_row >= self.row_offset + vis_rows {
+                    self.row_offset = self.sel_row + 1 - vis_rows;
+                }
+                let max_off = nrows.saturating_sub(vis_rows);
+                if self.row_offset > max_off {
+                    self.row_offset = max_off;
+                }
+
+                // Columnas visibles con scroll horizontal.
+                if self.sel_col < self.col_offset {
+                    self.col_offset = self.sel_col;
+                }
+                let grid_w = grid_area.width as usize;
+                let mut vis_cols = fit_cols(&w, self.col_offset, grid_w);
+                while !vis_cols.contains(&self.sel_col) && self.col_offset < self.sel_col {
+                    self.col_offset += 1;
+                    vis_cols = fit_cols(&w, self.col_offset, grid_w);
+                }
+
+                let lines = grid_lines(
+                    outcome,
+                    &w,
+                    &vis_cols,
+                    self.row_offset,
+                    vis_rows,
+                    self.sel_row,
+                    self.sel_col,
+                );
+                frame.render_widget(Paragraph::new(lines), grid_area);
+
+                // Resumen: posición + indicadores de scroll + meta.
+                let end = (self.row_offset + vis_rows).min(nrows);
+                let mut arrows = String::new();
+                if self.row_offset > 0 {
+                    arrows.push('↑');
+                }
+                if end < nrows {
+                    arrows.push('↓');
+                }
+                if self.col_offset > 0 {
+                    arrows.push('←');
+                }
+                if vis_cols.last().is_some_and(|&c| c + 1 < ncols) {
+                    arrows.push('→');
+                }
+                let pos = format!(
+                    "celda r{}/{} · c{}/{}",
+                    self.sel_row + 1,
+                    nrows,
+                    self.sel_col + 1,
+                    ncols
+                );
+                let sep = if arrows.is_empty() { "" } else { " " };
+                let summary = format!("{pos} {arrows}{sep}· {}", outcome.summary());
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        summary,
+                        Style::default().fg(theme::DIM),
+                    ))),
+                    parts[1],
+                );
             }
-            let widths: Vec<Constraint> = w
-                .iter()
-                .map(|x| Constraint::Length((*x as u16).clamp(3, 40) + 1))
-                .collect();
-
-            let header = Row::new(
-                o.columns
-                    .iter()
-                    .map(|c| Cell::from(c.clone()).style(theme::title(true))),
-            )
-            .style(Style::default().add_modifier(Modifier::BOLD));
-
-            let start = self.result_scroll.min(o.rows.len());
-            let body: Vec<Row> = o.rows[start..]
-                .iter()
-                .map(|r| Row::new(r.iter().map(|c| Cell::from(c.clone()))))
-                .collect();
-
-            let table = Table::new(body, widths)
-                .header(header)
-                .column_spacing(1)
-                .row_highlight_style(theme::selection());
-            frame.render_widget(table, rows_area[0]);
         }
-
-        let mut summary = o.summary();
-        if self.result_scroll > 0 {
-            summary = format!("↓{}  {summary}", self.result_scroll);
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                summary,
-                Style::default().fg(theme::DIM),
-            ))),
-            rows_area[1],
-        );
     }
 }
 
@@ -413,6 +518,116 @@ fn at_row(state: &mut ListState, len: usize, rel: usize) -> bool {
     let changed = state.selected() != Some(idx);
     state.select(Some(idx));
     changed
+}
+
+// --- Rejilla de resultados ---
+
+/// Ancho por columna = máx(cabecera, celdas), acotado a [3, 24].
+fn col_widths(o: &QueryOutcome) -> Vec<usize> {
+    let mut w: Vec<usize> = o.columns.iter().map(|c| c.chars().count()).collect();
+    for row in &o.rows {
+        for (i, cell) in row.iter().enumerate().take(w.len()) {
+            w[i] = w[i].max(cell.chars().count());
+        }
+    }
+    for x in &mut w {
+        *x = (*x).clamp(3, 24);
+    }
+    w
+}
+
+/// Columnas que caben desde `start` en `width` celdas (segmento = w+2 + separador).
+fn fit_cols(w: &[usize], start: usize, width: usize) -> Vec<usize> {
+    let mut vis = Vec::new();
+    let mut used = 0usize;
+    for (i, &wi) in w.iter().enumerate().skip(start) {
+        let seg = wi + 2 + usize::from(!vis.is_empty());
+        if !vis.is_empty() && used + seg > width {
+            break;
+        }
+        used += seg;
+        vis.push(i);
+    }
+    if vis.is_empty() && start < w.len() {
+        vis.push(start); // siempre al menos una
+    }
+    vis
+}
+
+/// Recorta a `w` caracteres (con `…`) o rellena con espacios a la derecha.
+fn pad_trunc(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n > w {
+        let mut out: String = s.chars().take(w.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    } else {
+        format!("{s}{}", " ".repeat(w - n))
+    }
+}
+
+/// Regla horizontal `─────┼─────` alineada con las columnas visibles.
+fn rule_line(w: &[usize], vis_cols: &[usize], style: Style) -> Line<'static> {
+    let mut s = String::new();
+    for (k, &ci) in vis_cols.iter().enumerate() {
+        if k > 0 {
+            s.push('┼');
+        }
+        for _ in 0..w[ci] + 2 {
+            s.push('─');
+        }
+    }
+    Line::from(Span::styled(s, style))
+}
+
+/// Construye las líneas de la rejilla (cabecera + regla + filas con reglas).
+#[allow(clippy::too_many_arguments)]
+fn grid_lines(
+    o: &QueryOutcome,
+    w: &[usize],
+    vis_cols: &[usize],
+    row_off: usize,
+    vis_rows: usize,
+    sel_row: usize,
+    sel_col: usize,
+) -> Vec<Line<'static>> {
+    let sep = Style::default().fg(theme::DIM);
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Cabecera.
+    let mut hspans: Vec<Span> = Vec::new();
+    for (k, &ci) in vis_cols.iter().enumerate() {
+        if k > 0 {
+            hspans.push(Span::styled("│", sep));
+        }
+        let text = pad_trunc(&o.columns[ci], w[ci]);
+        hspans.push(Span::styled(format!(" {text} "), theme::title(true)));
+    }
+    lines.push(Line::from(hspans));
+    lines.push(rule_line(w, vis_cols, sep));
+
+    // Filas visibles con regla entre ellas.
+    let end = (row_off + vis_rows).min(o.rows.len());
+    for r in row_off..end {
+        let row = &o.rows[r];
+        let mut spans: Vec<Span> = Vec::new();
+        for (k, &ci) in vis_cols.iter().enumerate() {
+            if k > 0 {
+                spans.push(Span::styled("│", sep));
+            }
+            let cell = row.get(ci).map(String::as_str).unwrap_or("");
+            let text = pad_trunc(cell, w[ci]);
+            let style = if r == sel_row && ci == sel_col {
+                theme::selection()
+            } else {
+                Style::default().fg(theme::FG)
+            };
+            spans.push(Span::styled(format!(" {text} "), style));
+        }
+        lines.push(Line::from(spans));
+        lines.push(rule_line(w, vis_cols, sep));
+    }
+    lines
 }
 
 fn dim(text: &str) -> Paragraph<'_> {

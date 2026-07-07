@@ -49,6 +49,7 @@ enum Focus {
     D1Dbs,
     D1Tables,
     D1Editor,
+    D1Where,
     D1Results,
     R2Buckets,
     R2Objects,
@@ -115,6 +116,7 @@ pub struct App {
     rect_d1_dbs: Option<Rect>,
     rect_d1_tables: Option<Rect>,
     rect_d1_editor: Option<Rect>,
+    rect_d1_where: Option<Rect>,
     rect_d1_results: Option<Rect>,
     rect_r2: Option<Rect>,
     rect_r2_objects: Option<Rect>,
@@ -160,6 +162,7 @@ impl App {
             rect_d1_dbs: None,
             rect_d1_tables: None,
             rect_d1_editor: None,
+            rect_d1_where: None,
             rect_d1_results: None,
             rect_r2: None,
             rect_r2_objects: None,
@@ -249,9 +252,10 @@ impl App {
             return;
         }
 
-        // El editor SQL captura todo el texto (incluidas q/x/?/A). Solo Tab y
-        // Shift-Tab salen del panel; ejecutar/editar lo gestiona route_focus_key.
-        if self.focus == Focus::D1Editor {
+        // El editor SQL y la barra WHERE capturan todo el texto (incluidas
+        // q/x/?/A). Solo Tab y Shift-Tab salen del panel; el resto lo gestiona
+        // route_focus_key (Enter ejecuta/aplica, texto edita el input).
+        if matches!(self.focus, Focus::D1Editor | Focus::D1Where) {
             match key.code {
                 KeyCode::Tab => self.dispatch(Action::CycleFocus { back: false }),
                 KeyCode::BackTab => self.dispatch(Action::CycleFocus { back: true }),
@@ -382,6 +386,12 @@ impl App {
             self.focus = Focus::D1Editor;
             return;
         }
+        if let Some(r) = self.rect_d1_where
+            && r.contains(pos)
+        {
+            self.focus = Focus::D1Where;
+            return;
+        }
         if let Some(r) = self.rect_d1_results
             && r.contains(pos)
         {
@@ -480,7 +490,7 @@ impl App {
             && r.contains(pos)
         {
             self.focus = Focus::D1Results;
-            self.d1.scroll_result(delta);
+            self.d1.move_cell(delta, 0);
             return;
         }
         if let Some(r) = self.rect_r2
@@ -609,11 +619,21 @@ impl App {
                 }
                 _ => {}
             },
+            Focus::D1Where => match key.code {
+                KeyCode::Enter => self.apply_where_filter(),
+                KeyCode::Esc => self.focus = Focus::D1Results,
+                code => edit_input(self.d1.where_mut(), code),
+            },
             Focus::D1Results => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.d1.scroll_result(-1),
-                KeyCode::Down | KeyCode::Char('j') => self.d1.scroll_result(1),
-                KeyCode::PageUp => self.d1.scroll_result(-10),
-                KeyCode::PageDown => self.d1.scroll_result(10),
+                KeyCode::Up | KeyCode::Char('k') => self.d1.move_cell(-1, 0),
+                KeyCode::Down | KeyCode::Char('j') => self.d1.move_cell(1, 0),
+                KeyCode::Left | KeyCode::Char('h') => self.d1.move_cell(0, -1),
+                KeyCode::Right | KeyCode::Char('l') => self.d1.move_cell(0, 1),
+                KeyCode::PageUp => self.d1.page_rows(-10),
+                KeyCode::PageDown => self.d1.page_rows(10),
+                KeyCode::Enter => self.open_cell_view(),
+                KeyCode::Char('y') => self.copy_cell(),
+                KeyCode::Char('Y') => self.copy_row(),
                 _ => {}
             },
             Focus::R2Buckets => match key.code {
@@ -2683,6 +2703,8 @@ impl App {
             self.status = "Escribe una consulta".into();
             return;
         }
+        // Consulta libre: el filtro WHERE no aplica (no hay tabla base conocida).
+        self.d1.set_filter_table(None);
         self.spawn_d1_query(db_id, "consulta".into(), sql);
     }
 
@@ -2694,7 +2716,56 @@ impl App {
         };
         let sql = format!("SELECT * FROM {} LIMIT 50", quote_ident(&table));
         self.d1.set_sql(sql.clone());
+        self.d1.set_filter_table(Some(table.clone()));
         self.spawn_d1_query(db_id, format!("{table} · SELECT * LIMIT 50"), sql);
+    }
+
+    /// Reejecuta la tabla actual con la cláusula WHERE de la barra de filtro.
+    fn apply_where_filter(&mut self) {
+        let (Some(db_id), Some(table)) = (self.d1.selected_db_id(), self.d1.filter_table()) else {
+            self.status = "El filtro aplica a una tabla seleccionada".into();
+            return;
+        };
+        let clause = self.d1.where_trimmed();
+        let ident = quote_ident(&table);
+        let (sql, title) = if clause.is_empty() {
+            (
+                format!("SELECT * FROM {ident} LIMIT 50"),
+                format!("{table} · SELECT * LIMIT 50"),
+            )
+        } else {
+            (
+                format!("SELECT * FROM {ident} WHERE {clause} LIMIT 50"),
+                format!("{table} · WHERE {clause}"),
+            )
+        };
+        self.d1.set_filter_table(Some(table));
+        self.spawn_d1_query(db_id, title, sql);
+    }
+
+    /// Popup con el valor completo de la celda seleccionada.
+    fn open_cell_view(&mut self) {
+        if let Some((col, val)) = self.d1.selected_cell_value() {
+            self.popup = Some(Popup::Message(Message {
+                title: col,
+                body: val,
+                is_error: false,
+            }));
+        }
+    }
+
+    fn copy_cell(&mut self) {
+        if let Some((_, val)) = self.d1.selected_cell_value() {
+            crate::tui::osc52_copy(&val);
+            self.status = "Celda copiada".into();
+        }
+    }
+
+    fn copy_row(&mut self) {
+        if let Some(tsv) = self.d1.selected_row_tsv() {
+            crate::tui::osc52_copy(&tsv);
+            self.status = "Fila copiada".into();
+        }
     }
 
     fn load_table_schema(&mut self) {
@@ -2703,6 +2774,7 @@ impl App {
             return;
         };
         let sql = format!("PRAGMA table_info({})", quote_ident(&table));
+        self.d1.set_filter_table(None);
         self.spawn_d1_query(db_id, format!("{table} · columnas"), sql);
     }
 
@@ -3151,6 +3223,7 @@ impl App {
             Focus::D1Dbs,
             Focus::D1Tables,
             Focus::D1Editor,
+            Focus::D1Where,
             Focus::D1Results,
         ];
         static R2_PANES: &[Focus] = &[Focus::Modules, Focus::R2Buckets, Focus::R2Objects];
@@ -3269,11 +3342,22 @@ impl App {
                     ("(texto)", "escribe SQL libremente"),
                 ],
             ),
+            Focus::D1Where => HelpSection::new(
+                "Filtro WHERE",
+                vec![
+                    ("(texto)", "escribe una cláusula WHERE"),
+                    ("Enter", "aplicar el filtro a la tabla"),
+                    ("Esc", "ir a los resultados"),
+                ],
+            ),
             Focus::D1Results => HelpSection::new(
                 "Resultados",
                 vec![
-                    ("↑ ↓ / k j", "desplazar filas"),
-                    ("PageUp/PageDown", "desplazar de 10 en 10"),
+                    ("↑ ↓ ← → / k j h l", "navegar celda a celda"),
+                    ("PageUp/PageDown", "desplazar filas de 10 en 10"),
+                    ("Enter", "ver el valor completo de la celda"),
+                    ("y", "copiar celda al portapapeles"),
+                    ("Y", "copiar fila completa (TSV)"),
                 ],
             ),
             Focus::R2Buckets => HelpSection::new(
@@ -3319,6 +3403,7 @@ impl App {
         self.rect_d1_dbs = None;
         self.rect_d1_tables = None;
         self.rect_d1_editor = None;
+        self.rect_d1_where = None;
         self.rect_d1_results = None;
         self.rect_r2 = None;
         self.rect_r2_objects = None;
@@ -3367,12 +3452,24 @@ impl App {
                     .draw_tables(frame, tables_area, self.focus == Focus::D1Tables);
                 self.d1
                     .draw_editor(frame, editor_area, self.focus == Focus::D1Editor);
+                // El área de resultados se parte en barra WHERE (3) + rejilla.
+                let where_result = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints([
+                        ratatui::layout::Constraint::Length(3),
+                        ratatui::layout::Constraint::Min(1),
+                    ])
+                    .split(result_area);
+                let (where_area, grid_area) = (where_result[0], where_result[1]);
                 self.d1
-                    .draw_result(frame, result_area, self.focus == Focus::D1Results);
+                    .draw_where(frame, where_area, self.focus == Focus::D1Where);
+                self.d1
+                    .draw_result(frame, grid_area, self.focus == Focus::D1Results);
                 self.rect_d1_dbs = Some(dbs_area);
                 self.rect_d1_tables = Some(tables_area);
                 self.rect_d1_editor = Some(editor_area);
-                self.rect_d1_results = Some(result_area);
+                self.rect_d1_where = Some(where_area);
+                self.rect_d1_results = Some(grid_area);
             }
             Module::R2 if main_active => {
                 let (buckets_area, info_area, objects_area) =
@@ -3443,7 +3540,10 @@ impl App {
                 Focus::D1Dbs => "↑↓ base · Tab → editor · r recargar · A · ? ayuda".into(),
                 Focus::D1Tables => "↑↓ tabla · Enter SELECT * · Tab → editor · r · ?".into(),
                 Focus::D1Editor => "escribe SQL · F5/Ctrl+Enter ejecutar · Tab → · ?".into(),
-                Focus::D1Results => "↑↓ scroll · PgUp/PgDn · Tab → · ? ayuda".into(),
+                Focus::D1Where => "escribe filtro WHERE · Enter aplicar · Tab → · ?".into(),
+                Focus::D1Results => {
+                    "↑↓←→ celda · Enter ver · y copiar · Y fila · PgUp/Dn · Tab →".into()
+                }
                 Focus::R2Buckets => "↑↓ bucket · n nuevo · d borrar · Tab → objetos · ?".into(),
                 Focus::R2Objects => {
                     "Enter abrir · u subir · d descargar · p URL · v ver · x borrar · ?".into()
