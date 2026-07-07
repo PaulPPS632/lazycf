@@ -36,6 +36,8 @@ pub enum Popup {
     ImageView(ImageView),
     /// Formulario de crear/editar registro DNS.
     RecordForm(RecordForm),
+    /// Formulario para añadir una ruta pública (ingress) a un túnel.
+    RouteForm(RouteForm),
     /// Prueba HTTP de una ruta de Worker.
     HttpTest(HttpTest),
     /// Editar/añadir una variable o secreto de un Worker.
@@ -315,6 +317,154 @@ impl RecordForm {
     }
 }
 
+/// Campos del formulario de ruta pública, en orden.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RouteField {
+    Subdomain,
+    Domain,
+    Path,
+    Service,
+}
+
+/// Zona candidata para el dominio de la ruta (nombre visible + id para el CNAME).
+#[derive(Clone)]
+pub struct ZoneRef {
+    pub name: String,
+    pub id: String,
+}
+
+/// Formulario para rutas públicas (ingress) de un túnel.
+/// - Crear (estilo dashboard "Agregar aplicación publicada"): subdominio +
+///   dominio de las zonas de la cuenta → el CNAME se crea automáticamente.
+/// - Editar (`editing = Some(hostname)`): el hostname es fijo (solo servicio y
+///   ruta), así el CNAME sigue siendo válido.
+pub struct RouteForm {
+    pub tunnel_id: String,
+    pub tunnel_name: String,
+    /// `Some(hostname)` = editando una ruta existente; `None` = creando.
+    pub editing: Option<String>,
+    pub subdomain: TextInput,
+    pub zones: Vec<ZoneRef>,
+    pub zone_idx: usize,
+    pub path: TextInput,
+    pub service: TextInput,
+    /// Índice dentro de `visible()`.
+    pub field: usize,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
+impl RouteForm {
+    pub fn new(tunnel_id: String, tunnel_name: String, zones: Vec<ZoneRef>) -> Self {
+        Self {
+            tunnel_id,
+            tunnel_name,
+            editing: None,
+            subdomain: TextInput::default(),
+            zones,
+            zone_idx: 0,
+            path: TextInput::default(),
+            service: TextInput::new("https://localhost:8080"),
+            field: 0,
+            error: None,
+            submitting: false,
+        }
+    }
+
+    /// Editar una ruta existente: hostname fijo, se editan servicio y ruta.
+    pub fn edit(
+        tunnel_id: String,
+        tunnel_name: String,
+        hostname: String,
+        service: String,
+        path: String,
+    ) -> Self {
+        Self {
+            tunnel_id,
+            tunnel_name,
+            editing: Some(hostname),
+            subdomain: TextInput::default(),
+            zones: Vec::new(),
+            zone_idx: 0,
+            path: TextInput::new(path),
+            service: TextInput::new(service),
+            field: 0,
+            error: None,
+            submitting: false,
+        }
+    }
+
+    /// Campos visibles según el modo (al editar, el hostname no se toca).
+    pub fn visible(&self) -> &'static [RouteField] {
+        if self.editing.is_some() {
+            &[RouteField::Path, RouteField::Service]
+        } else {
+            &[
+                RouteField::Subdomain,
+                RouteField::Domain,
+                RouteField::Path,
+                RouteField::Service,
+            ]
+        }
+    }
+
+    pub fn current(&self) -> RouteField {
+        let vis = self.visible();
+        vis[self.field.min(vis.len() - 1)]
+    }
+
+    pub fn move_field(&mut self, delta: i32) {
+        let n = self.visible().len() as i32;
+        self.field = ((((self.field as i32 + delta) % n) + n) % n) as usize;
+    }
+
+    /// Rellena las zonas si aún estaban vacías (llegaron tras abrir el form).
+    pub fn set_zones(&mut self, zones: Vec<ZoneRef>) {
+        if self.editing.is_none() && self.zones.is_empty() {
+            self.zones = zones;
+            self.zone_idx = 0;
+        }
+    }
+
+    /// Cambia el dominio seleccionado (select con ←→).
+    pub fn cycle_zone(&mut self, delta: i32) {
+        let n = self.zones.len() as i32;
+        if n == 0 {
+            return;
+        }
+        self.zone_idx = ((((self.zone_idx as i32 + delta) % n) + n) % n) as usize;
+    }
+
+    pub fn zone(&self) -> Option<&ZoneRef> {
+        self.zones.get(self.zone_idx)
+    }
+
+    /// Nombre de host completo. Al editar es el hostname fijo; al crear se
+    /// compone de subdominio + dominio (o solo dominio en el apex).
+    pub fn full_hostname(&self) -> Option<String> {
+        if let Some(h) = &self.editing {
+            return Some(h.clone());
+        }
+        let domain = &self.zone()?.name;
+        let sub = self.subdomain.value().trim();
+        Some(if sub.is_empty() {
+            domain.clone()
+        } else {
+            format!("{sub}.{domain}")
+        })
+    }
+
+    /// Campo de texto activo (`None` en el select Domain).
+    pub fn active_text_mut(&mut self) -> Option<&mut TextInput> {
+        match self.current() {
+            RouteField::Subdomain => Some(&mut self.subdomain),
+            RouteField::Path => Some(&mut self.path),
+            RouteField::Service => Some(&mut self.service),
+            RouteField::Domain => None,
+        }
+    }
+}
+
 /// Ayuda contextual: secciones de atajos aplicables al foco actual.
 pub struct Help {
     pub sections: Vec<HelpSection>,
@@ -410,6 +560,7 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::Presign(p) => draw_presign(frame, area, p),
         Popup::ImageView(v) => draw_image_view(frame, area, v),
         Popup::RecordForm(f) => draw_record_form(frame, area, f),
+        Popup::RouteForm(f) => draw_route_form(frame, area, f),
         Popup::HttpTest(t) => draw_http_test(frame, area, t),
         Popup::BindingEdit(b) => draw_binding_edit(frame, area, b),
         Popup::Message(msg) => draw_message(frame, area, msg),
@@ -790,6 +941,118 @@ fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
             .border_style(theme::border(true))
             .title_style(theme::title(true)),
     );
+    frame.render_widget(body, rect);
+}
+
+fn draw_route_form(frame: &mut Frame, area: Rect, f: &RouteForm) {
+    let cur = f.current();
+    let row = |label: &str, value: Vec<Span<'static>>, active: bool| -> Line<'static> {
+        let marker = if active { "▶ " } else { "  " };
+        let label_style = if active {
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::DIM)
+        };
+        let mut spans = vec![Span::styled(format!("{marker}{label:<11}"), label_style)];
+        spans.extend(value);
+        Line::from(spans)
+    };
+    // Campo de texto con placeholder tenue si está vacío y sin foco.
+    let text_field = |label: &str, input: &TextInput, ph: &str, fld: RouteField| -> Line<'static> {
+        let active = cur == fld;
+        let value = if input.value().is_empty() && !active {
+            vec![Span::styled(ph.to_string(), Style::default().fg(theme::DIM))]
+        } else {
+            input.spans(active)
+        };
+        row(label, value, active)
+    };
+
+    let editing = f.editing.is_some();
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Túnel: {}", f.tunnel_name),
+        Style::default().fg(theme::DIM),
+    )));
+
+    if let Some(host) = &f.editing {
+        // Edición: hostname fijo (solo servicio y ruta cambian).
+        lines.push(Line::from(vec![
+            Span::styled("  Host        ", Style::default().fg(theme::DIM)),
+            Span::styled(host.clone(), Style::default().fg(theme::ACCENT)),
+        ]));
+    } else {
+        lines.push(text_field(
+            "Subdominio",
+            &f.subdomain,
+            "www, blog, api (opcional)",
+            RouteField::Subdomain,
+        ));
+        // Dominio: select entre las zonas de la cuenta.
+        let domain_active = cur == RouteField::Domain;
+        let domain_val = match f.zone() {
+            Some(z) if domain_active => vec![Span::styled(
+                format!("‹ {} ›", z.name),
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            )],
+            Some(z) => vec![Span::styled(z.name.clone(), Style::default().fg(theme::FG))],
+            None => vec![Span::styled(
+                "(sin zonas en la cuenta)",
+                Style::default().fg(theme::ERROR),
+            )],
+        };
+        lines.push(row("Dominio", domain_val, domain_active));
+        // Nombre de host completo (calculado).
+        lines.push(Line::from(vec![
+            Span::styled("  Host completo ", Style::default().fg(theme::DIM)),
+            Span::styled(
+                f.full_hostname().unwrap_or_else(|| "—".into()),
+                Style::default().fg(theme::ACCENT),
+            ),
+        ]));
+    }
+    lines.push(text_field("Ruta", &f.path, "^/blog (opcional)", RouteField::Path));
+    lines.push(text_field(
+        "Servicio",
+        &f.service,
+        "https://localhost:8080",
+        RouteField::Service,
+    ));
+
+    lines.push(Line::from(""));
+    let hint = if f.submitting {
+        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+    } else if let Some(e) = &f.error {
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+    } else if editing {
+        Span::styled(
+            "↑↓ campo · Enter guardar · Esc",
+            Style::default().fg(theme::DIM),
+        )
+    } else {
+        Span::styled(
+            "↑↓ campo · ←→ dominio · Enter guardar · Esc",
+            Style::default().fg(theme::DIM),
+        )
+    };
+    lines.push(Line::from(hint));
+
+    let title = if editing {
+        " ✎ Editar ruta "
+    } else {
+        " ＋ Agregar aplicación publicada "
+    };
+    let height = (lines.len() as u16 + 2).clamp(9, area.height);
+    let rect = layout::centered(area, 70, height);
+    frame.render_widget(Clear, rect);
+    let body = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(title)
+                .border_style(theme::border(true))
+                .title_style(theme::title(true)),
+        )
+        .wrap(Wrap { trim: true });
     frame.render_widget(body, rect);
 }
 

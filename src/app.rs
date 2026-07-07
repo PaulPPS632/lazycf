@@ -18,8 +18,8 @@ use crate::components::input::TextInput;
 use crate::components::popup::{
     AccountPicker, AccountRow, BindingEdit, Confirm, Help, HelpSection, HttpTest, ImageView,
     Message,
-    NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, TokenEntry,
-    UploadForm,
+    NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, RouteField,
+    RouteForm, TokenEntry, UploadForm, ZoneRef,
 };
 use crate::components::r2::{BucketInfo, Entry, R2View};
 use crate::components::sidebar::Sidebar;
@@ -44,6 +44,7 @@ enum Focus {
     Zones,
     Records,
     Tunnels,
+    TunnelRoutes,
     Workers,
     D1Dbs,
     D1Tables,
@@ -109,6 +110,7 @@ pub struct App {
     rect_zones: Option<Rect>,
     rect_records: Option<Rect>,
     rect_tunnels: Option<Rect>,
+    rect_tunnel_routes: Option<Rect>,
     rect_workers: Option<Rect>,
     rect_d1_dbs: Option<Rect>,
     rect_d1_tables: Option<Rect>,
@@ -153,6 +155,7 @@ impl App {
             rect_zones: None,
             rect_records: None,
             rect_tunnels: None,
+            rect_tunnel_routes: None,
             rect_workers: None,
             rect_d1_dbs: None,
             rect_d1_tables: None,
@@ -331,6 +334,14 @@ impl App {
             }
             return;
         }
+        if let Some(r) = self.rect_tunnel_routes
+            && r.contains(pos)
+        {
+            self.focus = Focus::TunnelRoutes;
+            let rel = pos.y.saturating_sub(r.y + 1) as usize;
+            self.tunnels.route_at(rel);
+            return;
+        }
         if let Some(r) = self.rect_workers
             && r.contains(pos)
         {
@@ -437,6 +448,13 @@ impl App {
             self.change_tunnel(delta);
             return;
         }
+        if let Some(r) = self.rect_tunnel_routes
+            && r.contains(pos)
+        {
+            self.focus = Focus::TunnelRoutes;
+            self.tunnels.select_route(delta);
+            return;
+        }
         if let Some(r) = self.rect_workers
             && r.contains(pos)
         {
@@ -512,9 +530,27 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => self.change_tunnel(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.change_tunnel(1),
                 KeyCode::Char('n') => self.open_new_tunnel(),
+                KeyCode::Char('a') => self.open_new_route(),
                 KeyCode::Char('c') => self.confirm_cleanup(),
                 KeyCode::Char('d') => self.confirm_delete_tunnel(),
                 KeyCode::Char('r') => self.load_tunnels(),
+                _ => {}
+            },
+            Focus::TunnelRoutes => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.tunnels.select_route(-1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.tunnels.select_route(1);
+                }
+                KeyCode::Char('a') => self.open_new_route(),
+                KeyCode::Char('e') => self.open_edit_route(),
+                KeyCode::Char('d') => self.confirm_delete_route(),
+                KeyCode::Char('r') => {
+                    if let Some(id) = self.tunnels.selected_id() {
+                        self.load_ingress(id);
+                    }
+                }
                 _ => {}
             },
             Focus::Workers => match key.code {
@@ -644,6 +680,7 @@ impl App {
             NewTunnel,
             NewBucket,
             RecordForm,
+            RouteForm,
             HttpTest,
             BindingEdit,
             Upload,
@@ -659,6 +696,7 @@ impl App {
             Popup::NewTunnel(_) => Kind::NewTunnel,
             Popup::NewBucket(_) => Kind::NewBucket,
             Popup::RecordForm(_) => Kind::RecordForm,
+            Popup::RouteForm(_) => Kind::RouteForm,
             Popup::HttpTest(_) => Kind::HttpTest,
             Popup::BindingEdit(_) => Kind::BindingEdit,
             Popup::Upload(_) => Kind::Upload,
@@ -896,6 +934,63 @@ impl App {
                         KeyCode::Char(' ') if f.current() == RField::Proxy => {
                             f.proxied = !f.proxied
                         }
+                        code => {
+                            if let Some(s) = f.active_text_mut() {
+                                edit_input(s, code);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Kind::RouteForm => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::RouteForm(f)) if f.submitting) {
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    if let Some(Popup::RouteForm(f)) = self.popup.as_mut() {
+                        let Some(hostname) = f.full_hostname() else {
+                            f.error = Some("Selecciona un dominio (no hay zonas)".into());
+                            return None;
+                        };
+                        if f.service.value().trim().is_empty() {
+                            f.error = Some("La URL del servicio es obligatoria".into());
+                            return None;
+                        }
+                        let service = f.service.value().trim().to_string();
+                        let tunnel_id = f.tunnel_id.clone();
+                        f.error = None;
+                        f.submitting = true;
+                        // Editar (hostname fijo) vs crear (nueva regla + CNAME).
+                        if f.editing.is_some() {
+                            return Some(Action::EditTunnelRoute {
+                                tunnel_id,
+                                hostname,
+                                service,
+                                path: f.path.take(),
+                            });
+                        }
+                        let dns_zone = f.zone().map(|z| z.id.clone());
+                        return Some(Action::AddTunnelRoute {
+                            tunnel_id,
+                            hostname,
+                            service,
+                            path: f.path.take(),
+                            dns_zone,
+                        });
+                    }
+                    return None;
+                }
+                if let Some(Popup::RouteForm(f)) = self.popup.as_mut() {
+                    match key.code {
+                        KeyCode::Up | KeyCode::BackTab => f.move_field(-1),
+                        KeyCode::Down | KeyCode::Tab => f.move_field(1),
+                        KeyCode::Left if f.current() == RouteField::Domain => f.cycle_zone(-1),
+                        KeyCode::Right if f.current() == RouteField::Domain => f.cycle_zone(1),
                         code => {
                             if let Some(s) = f.active_text_mut() {
                                 edit_input(s, code);
@@ -1268,6 +1363,11 @@ impl App {
             Action::ZonesLoaded(zones) => {
                 self.all_zones = zones;
                 self.apply_account_filter();
+                // Si hay un form de ruta esperando zonas, rellénalo.
+                let refs = self.account_zone_refs();
+                if let Some(Popup::RouteForm(f)) = self.popup.as_mut() {
+                    f.set_zones(refs);
+                }
             }
             Action::RecordsLoaded { zone_id, records } => {
                 if self.dns.selected_zone_id().as_deref() == Some(zone_id.as_str()) {
@@ -1343,6 +1443,43 @@ impl App {
             }
             Action::CleanupConnections { tunnel_id } => self.spawn_cleanup(tunnel_id),
             Action::DeleteTunnel { tunnel_id } => self.spawn_delete_tunnel(tunnel_id),
+            Action::AddTunnelRoute {
+                tunnel_id,
+                hostname,
+                service,
+                path,
+                dns_zone,
+            } => self.spawn_add_route(tunnel_id, hostname, service, path, dns_zone),
+            Action::EditTunnelRoute {
+                tunnel_id,
+                hostname,
+                service,
+                path,
+            } => self.spawn_edit_route(tunnel_id, hostname, service, path),
+            Action::DeleteTunnelRoute {
+                tunnel_id,
+                hostname,
+            } => self.spawn_delete_route(tunnel_id, hostname),
+            Action::TunnelRouteMutated(msg) => {
+                self.status = msg;
+                // Cierra el form de ruta (si venía de ahí) y recarga solo las
+                // rutas del túnel actual, conservando la selección.
+                if matches!(self.popup, Some(Popup::RouteForm(_))) {
+                    self.popup = None;
+                }
+                if let Some(tunnel_id) = self.tunnels.selected_id() {
+                    self.load_ingress(tunnel_id);
+                }
+            }
+            Action::TunnelRouteError(e) => {
+                // Mantén el formulario abierto para corregir sin re-escribir.
+                if let Some(Popup::RouteForm(f)) = self.popup.as_mut() {
+                    f.submitting = false;
+                    f.error = Some(e);
+                } else {
+                    self.status = format!("Error: {e}");
+                }
+            }
             Action::TunnelMutated(msg) => {
                 self.status = msg;
                 self.load_tunnels();
@@ -1723,6 +1860,184 @@ impl App {
 
     fn open_new_tunnel(&mut self) {
         self.popup = Some(Popup::NewTunnel(NewTunnel::default()));
+    }
+
+    fn open_new_route(&mut self) {
+        let Some(tunnel) = self.tunnels.selected() else {
+            return;
+        };
+        let (id, name) = (tunnel.id.clone(), tunnel.name.clone());
+        // Zonas de la cuenta para el select de dominio. Si aún no se han cargado
+        // (no se entró a DNS), se lanza la carga y se rellenan al llegar.
+        if self.all_zones.is_empty() {
+            self.load_zones();
+        }
+        let zones = self.account_zone_refs();
+        self.popup = Some(Popup::RouteForm(RouteForm::new(id, name, zones)));
+    }
+
+    fn open_edit_route(&mut self) {
+        let (Some(tunnel), Some(route)) = (self.tunnels.selected(), self.tunnels.selected_route())
+        else {
+            return;
+        };
+        let (id, name) = (tunnel.id.clone(), tunnel.name.clone());
+        self.popup = Some(Popup::RouteForm(RouteForm::edit(
+            id,
+            name,
+            route.hostname.clone(),
+            route.service.clone(),
+            route.path.clone().unwrap_or_default(),
+        )));
+    }
+
+    fn confirm_delete_route(&mut self) {
+        let (Some(tunnel), Some(route)) = (self.tunnels.selected(), self.tunnels.selected_route())
+        else {
+            return;
+        };
+        let tunnel_id = tunnel.id.clone();
+        let hostname = route.hostname.clone();
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Borrar ruta".into(),
+            body: format!(
+                "¿Borrar la ruta {hostname}?\n\nQuita solo la regla del túnel; el registro DNS \
+                 (CNAME) se conserva — bórralo aparte en el módulo DNS si ya no lo necesitas."
+            ),
+            on_yes: Action::DeleteTunnelRoute {
+                tunnel_id,
+                hostname,
+            },
+        }));
+    }
+
+    /// Zonas de la cuenta activa como `ZoneRef` (nombre + id) para el select.
+    fn account_zone_refs(&self) -> Vec<ZoneRef> {
+        let acc = self.active_account_id();
+        self.all_zones
+            .iter()
+            .filter(|z| acc.is_none_or(|a| z.account_id().is_none_or(|zid| zid == a)))
+            .map(|z| ZoneRef {
+                name: z.name.clone(),
+                id: z.id.clone(),
+            })
+            .collect()
+    }
+
+    fn spawn_add_route(
+        &mut self,
+        tunnel_id: String,
+        hostname: String,
+        service: String,
+        path: String,
+        dns_zone: Option<String>,
+    ) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Añadiendo ruta…".into();
+        let hostname = hostname.trim().to_string();
+        let service = service.trim().to_string();
+        let path_opt = {
+            let p = path.trim().to_string();
+            (!p.is_empty()).then_some(p)
+        };
+        let target = format!("{tunnel_id}.cfargotunnel.com");
+        tokio::spawn(async move {
+            // 1. Regla de ingress.
+            if let Err(e) = client
+                .add_tunnel_route(
+                    &account_id,
+                    &tunnel_id,
+                    &hostname,
+                    &service,
+                    path_opt.as_deref(),
+                )
+                .await
+            {
+                let _ = tx.send(Action::TunnelRouteError(e.to_string()));
+                return;
+            }
+            // 2. CNAME proxied (si se pidió y hay zona). El fallo del DNS no anula
+            //    la ruta ya creada: se reporta como aviso.
+            let msg = match dns_zone {
+                Some(zone_id) => {
+                    let body = serde_json::json!({
+                        "type": "CNAME",
+                        "name": hostname,
+                        "content": target,
+                        "proxied": true,
+                        "ttl": 1,
+                    });
+                    match client.create_dns_record(&zone_id, &body).await {
+                        Ok(_) => format!("Ruta {hostname} añadida (+ DNS)"),
+                        Err(e) => format!("Ruta {hostname} añadida, pero el DNS falló: {e}"),
+                    }
+                }
+                None => format!("Ruta {hostname} añadida (crea el DNS manualmente)"),
+            };
+            let _ = tx.send(Action::TunnelRouteMutated(msg));
+        });
+    }
+
+    fn spawn_edit_route(
+        &mut self,
+        tunnel_id: String,
+        hostname: String,
+        service: String,
+        path: String,
+    ) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Guardando ruta…".into();
+        let service = service.trim().to_string();
+        let path_opt = {
+            let p = path.trim().to_string();
+            (!p.is_empty()).then_some(p)
+        };
+        tokio::spawn(async move {
+            let action = match client
+                .update_tunnel_route(
+                    &account_id,
+                    &tunnel_id,
+                    &hostname,
+                    &service,
+                    path_opt.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => Action::TunnelRouteMutated(format!("Ruta {hostname} actualizada")),
+                Err(e) => Action::TunnelRouteError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn spawn_delete_route(&mut self, tunnel_id: String, hostname: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Borrando ruta…".into();
+        tokio::spawn(async move {
+            let action = match client
+                .delete_tunnel_route(&account_id, &tunnel_id, &hostname)
+                .await
+            {
+                Ok(()) => Action::TunnelRouteMutated(format!("Ruta {hostname} borrada")),
+                Err(e) => Action::TunnelError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
     }
 
     // --- Tareas async ---
@@ -2828,7 +3143,8 @@ impl App {
 
     fn panes(&self) -> &'static [Focus] {
         static DNS_PANES: &[Focus] = &[Focus::Modules, Focus::Zones, Focus::Records];
-        static TUNNEL_PANES: &[Focus] = &[Focus::Modules, Focus::Tunnels];
+        static TUNNEL_PANES: &[Focus] =
+            &[Focus::Modules, Focus::Tunnels, Focus::TunnelRoutes];
         static WORKER_PANES: &[Focus] = &[Focus::Modules, Focus::Workers];
         static D1_PANES: &[Focus] = &[
             Focus::Modules,
@@ -2900,10 +3216,22 @@ impl App {
                 "Túneles",
                 vec![
                     ("↑ ↓ / k j", "navegar túneles"),
+                    ("Tab", "ir a las rutas del túnel"),
                     ("n", "nuevo túnel"),
+                    ("a", "añadir ruta pública (+ DNS)"),
                     ("c", "limpiar conexiones (con confirmación)"),
                     ("d", "borrar túnel (con confirmación)"),
                     ("r", "recargar túneles"),
+                ],
+            ),
+            Focus::TunnelRoutes => HelpSection::new(
+                "Rutas del túnel",
+                vec![
+                    ("↑ ↓ / k j", "navegar rutas"),
+                    ("a", "añadir ruta pública (+ DNS)"),
+                    ("e", "editar ruta (servicio/ruta)"),
+                    ("d", "borrar ruta (con confirmación)"),
+                    ("r", "recargar rutas"),
                 ],
             ),
             Focus::Workers => HelpSection::new(
@@ -2986,6 +3314,7 @@ impl App {
         self.rect_zones = None;
         self.rect_records = None;
         self.rect_tunnels = None;
+        self.rect_tunnel_routes = None;
         self.rect_workers = None;
         self.rect_d1_dbs = None;
         self.rect_d1_tables = None;
@@ -3011,12 +3340,15 @@ impl App {
                 self.rect_records = Some(records_area);
             }
             Module::Tunnels if main_active => {
-                let (list_area, detail_area) =
+                let (list_area, detail_area, routes_area) =
                     crate::components::tunnels::split(shell.main);
                 self.tunnels
                     .draw_list(frame, list_area, self.focus == Focus::Tunnels);
                 self.tunnels.draw_detail(frame, detail_area, false);
+                self.tunnels
+                    .draw_routes(frame, routes_area, self.focus == Focus::TunnelRoutes);
                 self.rect_tunnels = Some(list_area);
+                self.rect_tunnel_routes = Some(routes_area);
             }
             Module::Workers if main_active => {
                 let (list_area, detail_area) =
@@ -3099,7 +3431,12 @@ impl App {
                 Focus::Records => {
                     "↑↓ · Espacio proxy · a nuevo · e editar · d borrar · ? ayuda".into()
                 }
-                Focus::Tunnels => "↑↓ túnel · n nuevo · c limpiar · d borrar · ? ayuda".into(),
+                Focus::Tunnels => {
+                    "↑↓ túnel · Tab → rutas · n nuevo · a ruta · c limpiar · d borrar · ?".into()
+                }
+                Focus::TunnelRoutes => {
+                    "↑↓ ruta · a añadir · e editar · d borrar · Tab → · ? ayuda".into()
+                }
                 Focus::Workers => {
                     "↑↓ · 1-4 pestaña · e editar · a secreto · l logs · t probar · ?".into()
                 }

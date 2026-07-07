@@ -98,6 +98,32 @@ pub enum Action {
     DeleteTunnel {
         tunnel_id: String,
     },
+    /// Añadir una ruta pública (regla de ingress) a un túnel; opcionalmente crea
+    /// el CNAME proxied en la zona `dns_zone` (`None` = no crear DNS).
+    AddTunnelRoute {
+        tunnel_id: String,
+        hostname: String,
+        service: String,
+        path: String,
+        dns_zone: Option<String>,
+    },
+    /// Editar una ruta existente (servicio/ruta; el hostname no cambia).
+    EditTunnelRoute {
+        tunnel_id: String,
+        hostname: String,
+        service: String,
+        path: String,
+    },
+    /// Borrar una ruta (regla de ingress) por hostname; NO borra el CNAME.
+    DeleteTunnelRoute {
+        tunnel_id: String,
+        hostname: String,
+    },
+    /// Mutación de ruta OK: fija estado, cierra el form y recarga las rutas del
+    /// túnel actual (sin recargar toda la lista, que perdería la selección).
+    TunnelRouteMutated(String),
+    /// Error al añadir/editar una ruta (mantiene el formulario abierto).
+    TunnelRouteError(String),
     /// Error en una operación de túneles.
     TunnelError(String),
     /// Mutación de túnel OK: fija estado y recarga la lista.
