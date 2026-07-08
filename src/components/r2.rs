@@ -13,9 +13,9 @@ use ratatui::Frame;
 
 use crate::api::r2::ObjectList;
 use crate::components::input::TextInput;
-use crate::components::workers::Loadable;
 use crate::model::{CustomDomain, PublicDomain, R2Bucket, R2Object, R2Usage};
-use crate::ui::theme;
+use crate::ui::widgets::{dim, dim_line, human_size, metric_line, placeholder, row_at, select_wrap, short_date};
+use crate::ui::{theme, Loadable};
 
 /// Detalle + uso + dominios + CORS de un bucket (se cargan juntos).
 #[derive(Debug, Clone)]
@@ -124,11 +124,11 @@ impl R2View {
     }
 
     pub fn select(&mut self, delta: i32) -> bool {
-        select_in(&mut self.state, self.buckets.len(), delta)
+        select_wrap(&mut self.state, self.buckets.len(), delta)
     }
 
     pub fn bucket_at(&mut self, rel: usize) -> bool {
-        at_row(&mut self.state, self.buckets.len(), rel)
+        row_at(&mut self.state, self.buckets.len(), rel)
     }
 
     pub fn begin_info(&mut self, bucket: String) {
@@ -292,11 +292,11 @@ impl R2View {
     }
 
     pub fn select_entry(&mut self, delta: i32) -> bool {
-        select_in(&mut self.obj_state, self.visible.len(), delta)
+        select_wrap(&mut self.obj_state, self.visible.len(), delta)
     }
 
     pub fn entry_at(&mut self, rel: usize) -> bool {
-        at_row(&mut self.obj_state, self.visible.len(), rel)
+        row_at(&mut self.obj_state, self.visible.len(), rel)
     }
 
     // --- Filtro de la carpeta actual ---
@@ -694,7 +694,7 @@ fn entry_item(entry: &Entry, width: usize, marked: bool, full_key: bool) -> List
             } else {
                 o.filename().to_string()
             };
-            let meta = format!("{:>10}  {}", human_size(o.size), short_date(&o.last_modified));
+            let meta = format!("{:>10}  {}", human_size(o.size), short_date(&o.last_modified, 10));
             // Nombre a la izquierda, meta a la derecha (recortando el nombre).
             let avail = width.saturating_sub(meta.len() + 5).max(8);
             let shown: String = if name.chars().count() > avail {
@@ -732,13 +732,13 @@ fn info_lines(info: &BucketInfo) -> Vec<Line<'static>> {
     let d = &info.detail;
     let u = &info.usage;
     let mut lines = vec![
-        kv("Creado", &short_date(&d.creation_date)),
-        kv("Ubicación", d.location.as_deref().unwrap_or("—")),
-        kv("Clase", d.storage_class.as_deref().unwrap_or("—")),
+        metric_line("Creado", &short_date(&d.creation_date, 10), 11),
+        metric_line("Ubicación", d.location.as_deref().unwrap_or("—"), 11),
+        metric_line("Clase", d.storage_class.as_deref().unwrap_or("—"), 11),
         Line::from(""),
-        kv("Objetos", &u.objects().to_string()),
-        kv("Tamaño", &human_size(u.payload())),
-        kv("Metadatos", &human_size(u.metadata())),
+        metric_line("Objetos", &u.objects().to_string(), 11),
+        metric_line("Tamaño", &human_size(u.payload()), 11),
+        metric_line("Metadatos", &human_size(u.metadata()), 11),
         Line::from(""),
     ];
 
@@ -761,7 +761,7 @@ fn info_lines(info: &BucketInfo) -> Vec<Line<'static>> {
     } else {
         format!("{} regla(s)", info.cors_rules.len())
     };
-    lines.push(kv("CORS", &cors_text));
+    lines.push(metric_line("CORS", &cors_text, 11));
 
     if !info.domains.is_empty() {
         lines.push(Line::from(""));
@@ -841,73 +841,3 @@ pub fn image_lines(w: u32, h: u32, rgb: &[u8]) -> Vec<Line<'static>> {
     lines
 }
 
-// --- Helpers ---
-
-pub fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{size:.2} {}", UNITS[unit])
-    }
-}
-
-fn short_date(iso: &str) -> String {
-    if iso.len() >= 10 {
-        iso[..10].to_string()
-    } else {
-        iso.to_string()
-    }
-}
-
-fn kv(key: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{key:<11}"), Style::default().fg(theme::DIM)),
-        Span::styled(value.to_string(), Style::default().fg(theme::FG)),
-    ])
-}
-
-fn select_in(state: &mut ListState, len: usize, delta: i32) -> bool {
-    if len == 0 {
-        return false;
-    }
-    let cur = state.selected().unwrap_or(0) as i32;
-    let n = len as i32;
-    let next = ((((cur + delta) % n) + n) % n) as usize;
-    let changed = state.selected() != Some(next);
-    state.select(Some(next));
-    changed
-}
-
-fn at_row(state: &mut ListState, len: usize, rel: usize) -> bool {
-    let idx = rel + state.offset();
-    if idx >= len {
-        return false;
-    }
-    let changed = state.selected() != Some(idx);
-    state.select(Some(idx));
-    changed
-}
-
-fn dim(text: &str) -> Paragraph<'_> {
-    Paragraph::new(text)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
-}
-
-fn dim_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), Style::default().fg(theme::DIM)))
-}
-
-fn placeholder<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
-    Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
-}

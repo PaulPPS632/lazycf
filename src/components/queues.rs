@@ -7,10 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
-use crate::components::r2::human_size;
-use crate::components::workers::{short_date, Loadable};
 use crate::model::{Queue, QueueConsumer, QueueMetrics};
-use crate::ui::theme;
+use crate::ui::widgets::{dim, dim_line, human_size, metric_line, placeholder, short_date, tab_bar};
+use crate::ui::{theme, Loadable};
 
 pub const TABS: [&str; 3] = ["Resumen", "Consumers", "Métricas"];
 
@@ -233,7 +232,7 @@ impl QueuesView {
     pub fn draw_detail(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let title = match self.selected() {
             Some(q) if !q.modified_on.is_empty() => {
-                format!(" {} · mod {} ", q.queue_name, short_date(&q.modified_on))
+                format!(" {} · mod {} ", q.queue_name, short_date(&q.modified_on, 16))
             }
             Some(q) => format!(" {} ", q.queue_name),
             None => " Detalle ".to_string(),
@@ -257,7 +256,7 @@ impl QueuesView {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
             .split(inner);
-        frame.render_widget(self.tab_bar(), rows[0]);
+        frame.render_widget(tab_bar(&TABS, self.active_tab), rows[0]);
         // rows[1] queda como separador visual.
 
         match self.active_tab {
@@ -267,31 +266,13 @@ impl QueuesView {
         }
     }
 
-    fn tab_bar(&self) -> Line<'static> {
-        let mut spans = Vec::new();
-        for (i, t) in TABS.iter().enumerate() {
-            let style = if i == self.active_tab {
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(ratatui::style::Modifier::BOLD)
-            } else {
-                Style::default().fg(theme::DIM)
-            };
-            spans.push(Span::styled(format!(" {} {} ", i + 1, t), style));
-            if i + 1 < TABS.len() {
-                spans.push(Span::styled("·", Style::default().fg(theme::DIM)));
-            }
-        }
-        Line::from(spans)
-    }
-
     fn draw_resumen(&self, frame: &mut Frame, area: Rect) {
         let Some(q) = self.selected() else {
             return;
         };
         let mut lines = vec![
-            metric_line("ID", &q.queue_id),
-            metric_line("Creada", &short_date(&q.created_on)),
+            metric_line("ID", &q.queue_id, 12),
+            metric_line("Creada", &short_date(&q.created_on, 16), 12),
         ];
         // Estado de la entrega.
         let (estado, color) = if q.settings.delivery_paused {
@@ -309,6 +290,7 @@ impl QueuesView {
                 .delivery_delay
                 .map(|d| format!("{d}s"))
                 .unwrap_or_else(|| "—".into()),
+            12,
         ));
         lines.push(metric_line(
             "Retención",
@@ -316,6 +298,7 @@ impl QueuesView {
                 .message_retention_period
                 .map(|s| format!("{s}s"))
                 .unwrap_or_else(|| "—".into()),
+            12,
         ));
 
         lines.push(Line::from(""));
@@ -446,8 +429,8 @@ impl QueuesView {
                     ])
                     .split(area);
                 let head = vec![
-                    metric_line("Backlog", &format!("{} mensajes", m.backlog_messages)),
-                    metric_line("Tamaño", &human_size(m.backlog_bytes)),
+                    metric_line("Backlog", &format!("{} mensajes", m.backlog_messages), 12),
+                    metric_line("Tamaño", &human_size(m.backlog_bytes), 12),
                     Line::from(""),
                 ];
                 frame.render_widget(Paragraph::new(head), split[0]);
@@ -480,26 +463,3 @@ impl QueuesView {
     }
 }
 
-fn metric_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<12}"), Style::default().fg(theme::DIM)),
-        Span::styled(value.to_string(), Style::default().fg(theme::FG)),
-    ])
-}
-
-fn dim(text: &str) -> Paragraph<'_> {
-    Paragraph::new(text)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
-}
-
-fn dim_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), Style::default().fg(theme::DIM)))
-}
-
-fn placeholder<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
-    Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
-}

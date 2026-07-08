@@ -10,6 +10,7 @@ use ratatui::Frame;
 use crate::action::Action;
 use crate::components::input::TextInput;
 use crate::model::{Binding, CustomDomain, DnsRecord, PulledMessage, QueueConsumer};
+use crate::ui::widgets::field_row;
 use crate::ui::{layout, theme};
 
 /// Popup activo.
@@ -22,10 +23,8 @@ pub enum Popup {
     AccountPicker(AccountPicker),
     /// Ayuda: atajos del contexto actual (los construye `app.rs`).
     Help(Help),
-    /// Entrada del nombre para crear un túnel.
-    NewTunnel(NewTunnel),
-    /// Entrada del nombre para crear un bucket R2.
-    NewBucket(NewBucket),
+    /// Entrada modal de una sola línea (nuevo túnel/bucket/cola/carpeta, búsqueda).
+    TextPrompt(TextPrompt),
     /// Subir un archivo a R2.
     Upload(UploadForm),
     /// Renombrar un objeto R2.
@@ -48,18 +47,12 @@ pub enum Popup {
     CorsEdit(CorsEditForm),
     /// Elegir con qué dominio abrir/copiar la URL de un objeto R2.
     ChooseDomain(ChooseDomain),
-    /// Término para la búsqueda profunda en todo el bucket.
-    SearchInput(SearchInput),
-    /// Nombre de la carpeta nueva (objeto marcador vacío).
-    NewFolder(NewFolder),
     /// Dominios personalizados del bucket: lista + añadir/quitar.
     BucketDomains(BucketDomains),
     /// Conectar un dominio personalizado (subdominio + zona de la cuenta).
     DomainAdd(DomainAddForm),
     /// Detalle scrollable de un evento del live-tail de Workers.
     LogDetail(LogDetail),
-    /// Entrada del nombre para crear una cola.
-    NewQueue(NewQueue),
     /// Enviar un mensaje a una cola.
     SendMessage(SendMessageForm),
     /// Editar la configuración de un consumer de cola.
@@ -70,11 +63,56 @@ pub enum Popup {
     Message(Message),
 }
 
-/// Entrada de una sola línea (nombre de la cola).
-#[derive(Default)]
-pub struct NewQueue {
-    pub name: TextInput,
+/// Qué crea/hace un `TextPrompt` de una sola línea. Determina título, etiqueta,
+/// pista y la `Action` que se emite al enviar (esta última la resuelve `app.rs`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    NewTunnel,
+    NewBucket,
+    NewQueue,
+    NewFolder,
+    Search,
+}
+
+impl PromptKind {
+    /// `(título, etiqueta, verbo de la pista, pie opcional)`.
+    fn spec(self) -> (&'static str, &'static str, &'static str, Option<&'static str>) {
+        match self {
+            PromptKind::NewTunnel => (" 🚇 Nuevo túnel ", "Nombre del nuevo túnel:", "crear", None),
+            PromptKind::NewBucket => (" 📦 Nuevo bucket ", "Nombre del nuevo bucket:", "crear", None),
+            PromptKind::NewQueue => (" 📨 Nueva cola ", "Nombre de la nueva cola:", "crear", None),
+            PromptKind::NewFolder => (
+                " 📁 Nueva carpeta ",
+                "Nombre de la carpeta:",
+                "crear",
+                Some("Se crea un objeto marcador vacío (como en el dashboard)"),
+            ),
+            PromptKind::Search => (
+                " 🔎 Buscar en el bucket ",
+                "Término (subcadena, sin distinguir mayúsculas):",
+                "buscar",
+                None,
+            ),
+        }
+    }
+}
+
+/// Entrada modal de una sola línea (nombre/término). Reúne los 5 popups que
+/// antes eran structs + `draw_*` + arm de `popup_key` calcados byte a byte.
+pub struct TextPrompt {
+    pub kind: PromptKind,
+    pub input: TextInput,
     pub error: Option<String>,
+}
+
+impl TextPrompt {
+    pub fn new(kind: PromptKind) -> Self {
+        Self {
+            kind,
+            input: TextInput::default(),
+            error: None,
+        }
+    }
 }
 
 /// Campos del formulario de envío de mensaje.
@@ -372,20 +410,6 @@ impl BindingEdit {
     }
 }
 
-/// Entrada de una sola línea (nombre del túnel).
-#[derive(Default)]
-pub struct NewTunnel {
-    pub name: TextInput,
-    pub error: Option<String>,
-}
-
-/// Entrada de una sola línea (nombre del bucket R2).
-#[derive(Default)]
-pub struct NewBucket {
-    pub name: TextInput,
-    pub error: Option<String>,
-}
-
 /// Renombrar un objeto R2 (dentro de la misma carpeta): solo cambia el
 /// nombre de archivo, el prefijo/carpeta se mantiene.
 pub struct RenameForm {
@@ -395,20 +419,6 @@ pub struct RenameForm {
     pub move_mode: bool,
     pub error: Option<String>,
     pub submitting: bool,
-}
-
-/// Término de búsqueda profunda (subcadena sobre las claves de todo el bucket).
-#[derive(Default)]
-pub struct SearchInput {
-    pub term: TextInput,
-    pub error: Option<String>,
-}
-
-/// Nombre de la carpeta nueva (crea el objeto marcador `prefijo/nombre/`).
-#[derive(Default)]
-pub struct NewFolder {
-    pub name: TextInput,
-    pub error: Option<String>,
 }
 
 /// Dominios personalizados de un bucket (snapshot de `BucketInfo.domains`).
@@ -982,8 +992,7 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::Confirm(c) => draw_confirm(frame, area, c),
         Popup::AccountPicker(p) => draw_account_picker(frame, area, p),
         Popup::Help(h) => draw_help(frame, area, h),
-        Popup::NewTunnel(t) => draw_new_tunnel(frame, area, t),
-        Popup::NewBucket(b) => draw_new_bucket(frame, area, b),
+        Popup::TextPrompt(p) => draw_text_prompt(frame, area, p),
         Popup::Upload(u) => draw_upload(frame, area, u),
         Popup::Rename(r) => draw_rename(frame, area, r),
         Popup::R2Creds(c) => draw_r2_creds(frame, area, c),
@@ -995,12 +1004,9 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::BindingEdit(b) => draw_binding_edit(frame, area, b),
         Popup::CorsEdit(c) => draw_cors_edit(frame, area, c),
         Popup::ChooseDomain(c) => draw_choose_domain(frame, area, c),
-        Popup::SearchInput(s) => draw_search_input(frame, area, s),
-        Popup::NewFolder(f) => draw_new_folder(frame, area, f),
         Popup::BucketDomains(d) => draw_bucket_domains(frame, area, d),
         Popup::DomainAdd(f) => draw_domain_add(frame, area, f),
         Popup::LogDetail(d) => draw_log_detail(frame, area, d),
-        Popup::NewQueue(q) => draw_new_queue(frame, area, q),
         Popup::SendMessage(f) => draw_send_message(frame, area, f),
         Popup::ConsumerEdit(f) => draw_consumer_edit(frame, area, f),
         Popup::PeekView(v) => draw_peek_view(frame, area, v),
@@ -1039,7 +1045,7 @@ fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {
     let mut lines: Vec<Line> = Vec::new();
     // Campo nombre (editable solo al añadir; si no, informativo).
     if b.adding {
-        lines.push(field_line("Nombre", &b.name, b.field == 0));
+        lines.push(field_row("Nombre", &b.name, b.field == 0, 10));
     } else {
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<10}", "Nombre"), Style::default().fg(theme::DIM)),
@@ -1054,7 +1060,7 @@ fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {
         ]));
     }
     let value_active = b.field == b.field_count() - 1;
-    lines.push(field_line("Valor", &b.value, value_active));
+    lines.push(field_row("Valor", &b.value, value_active, 10));
 
     lines.push(Line::from(""));
     let hint = if b.submitting {
@@ -1088,18 +1094,6 @@ fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {
     frame.render_widget(body, rect);
 }
 
-/// Línea de campo editable con marcador de foco y cursor.
-fn field_line(label: &str, input: &TextInput, active: bool) -> Line<'static> {
-    let marker = if active { "▶ " } else { "  " };
-    let label_style = if active {
-        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::DIM)
-    };
-    let mut spans = vec![Span::styled(format!("{marker}{label:<10}"), label_style)];
-    spans.extend(input.spans(active));
-    Line::from(spans)
-}
 
 fn draw_http_test(frame: &mut Frame, area: Rect, t: &HttpTest) {
     let rect = layout::centered(area, 74, 8);
@@ -1325,55 +1319,37 @@ fn draw_image_view(frame: &mut Frame, area: Rect, v: &ImageView) {
     frame.render_widget(body, rect);
 }
 
-fn draw_new_bucket(frame: &mut Frame, area: Rect, b: &NewBucket) {
-    let rect = layout::centered(area, 56, 8);
+/// Dibuja cualquier `TextPrompt` (nuevo túnel/bucket/cola/carpeta, búsqueda).
+fn draw_text_prompt(frame: &mut Frame, area: Rect, p: &TextPrompt) {
+    let (title, label, verb, footer) = p.kind.spec();
+    let height = if footer.is_some() { 9 } else { 8 };
+    let rect = layout::centered(area, 62, height);
     frame.render_widget(Clear, rect);
-    let status: Line = match &b.error {
+    let status: Line = match &p.error {
         Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
         None => Line::from(Span::styled(
-            "Enter crear · Esc cancelar",
+            format!("Enter {verb} · Esc cancelar"),
             Style::default().fg(theme::DIM),
         )),
     };
-    let body = Paragraph::new(vec![
-        Line::from("Nombre del nuevo bucket:"),
+    let mut lines = vec![
+        Line::from(label),
         Line::from(""),
-        Line::from(b.name.spans(true)),
+        Line::from(p.input.spans(true)),
         Line::from(""),
-        status,
-    ])
-    .block(
-        Block::bordered()
-            .title(" 📦 Nuevo bucket ")
-            .border_style(theme::border(true))
-            .title_style(theme::title(true)),
-    );
-    frame.render_widget(body, rect);
-}
-
-fn draw_new_queue(frame: &mut Frame, area: Rect, q: &NewQueue) {
-    let rect = layout::centered(area, 56, 8);
-    frame.render_widget(Clear, rect);
-    let status: Line = match &q.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
-        None => Line::from(Span::styled(
-            "Enter crear · Esc cancelar",
-            Style::default().fg(theme::DIM),
-        )),
-    };
-    let body = Paragraph::new(vec![
-        Line::from("Nombre de la nueva cola:"),
-        Line::from(""),
-        Line::from(q.name.spans(true)),
-        Line::from(""),
-        status,
-    ])
-    .block(
-        Block::bordered()
-            .title(" 📨 Nueva cola ")
-            .border_style(theme::border(true))
-            .title_style(theme::title(true)),
-    );
+    ];
+    if let Some(f) = footer {
+        lines.push(Line::from(Span::styled(f, Style::default().fg(theme::DIM))));
+    }
+    lines.push(status);
+    let body = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(title)
+                .border_style(theme::border(true))
+                .title_style(theme::title(true)),
+        )
+        .wrap(Wrap { trim: true });
     frame.render_widget(body, rect);
 }
 
@@ -1558,31 +1534,6 @@ fn draw_peek_view(frame: &mut Frame, area: Rect, v: &mut PeekView) {
     frame.render_stateful_widget(list, rect, &mut v.state);
 }
 
-fn draw_new_tunnel(frame: &mut Frame, area: Rect, t: &NewTunnel) {
-    let rect = layout::centered(area, 56, 8);
-    frame.render_widget(Clear, rect);
-    let status: Line = match &t.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
-        None => Line::from(Span::styled(
-            "Enter crear · Esc cancelar",
-            Style::default().fg(theme::DIM),
-        )),
-    };
-    let body = Paragraph::new(vec![
-        Line::from("Nombre del nuevo túnel:"),
-        Line::from(""),
-        Line::from(t.name.spans(true)),
-        Line::from(""),
-        status,
-    ])
-    .block(
-        Block::bordered()
-            .title(" 🚇 Nuevo túnel ")
-            .border_style(theme::border(true))
-            .title_style(theme::title(true)),
-    );
-    frame.render_widget(body, rect);
-}
 
 fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
     let visible = f.visible();
@@ -1952,63 +1903,6 @@ fn draw_choose_domain(frame: &mut Frame, area: Rect, c: &mut ChooseDomain) {
         .highlight_style(theme::selection())
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, rect, &mut c.state);
-}
-
-fn draw_search_input(frame: &mut Frame, area: Rect, s: &SearchInput) {
-    let rect = layout::centered(area, 62, 8);
-    frame.render_widget(Clear, rect);
-    let status: Line = match &s.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
-        None => Line::from(Span::styled(
-            "Enter buscar · Esc cancelar",
-            Style::default().fg(theme::DIM),
-        )),
-    };
-    let body = Paragraph::new(vec![
-        Line::from("Término (subcadena, sin distinguir mayúsculas):"),
-        Line::from(""),
-        Line::from(s.term.spans(true)),
-        Line::from(""),
-        status,
-    ])
-    .block(
-        Block::bordered()
-            .title(" 🔎 Buscar en el bucket ")
-            .border_style(theme::border(true))
-            .title_style(theme::title(true)),
-    );
-    frame.render_widget(body, rect);
-}
-
-fn draw_new_folder(frame: &mut Frame, area: Rect, f: &NewFolder) {
-    let rect = layout::centered(area, 62, 9);
-    frame.render_widget(Clear, rect);
-    let status: Line = match &f.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
-        None => Line::from(Span::styled(
-            "Enter crear · Esc cancelar",
-            Style::default().fg(theme::DIM),
-        )),
-    };
-    let body = Paragraph::new(vec![
-        Line::from("Nombre de la carpeta:"),
-        Line::from(""),
-        Line::from(f.name.spans(true)),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Se crea un objeto marcador vacío (como en el dashboard)",
-            Style::default().fg(theme::DIM),
-        )),
-        status,
-    ])
-    .block(
-        Block::bordered()
-            .title(" 📁 Nueva carpeta ")
-            .border_style(theme::border(true))
-            .title_style(theme::title(true)),
-    )
-    .wrap(Wrap { trim: true });
-    frame.render_widget(body, rect);
 }
 
 fn draw_bucket_domains(frame: &mut Frame, area: Rect, d: &mut BucketDomains) {

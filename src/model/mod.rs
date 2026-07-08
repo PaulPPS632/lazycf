@@ -4,7 +4,8 @@
 use serde::{Deserialize, Deserializer};
 
 /// Algunos endpoints devuelven `null` (no solo el campo ausente) para listas
-/// vacías; `#[serde(default)]` por sí solo no cubre ese caso.
+/// vacías o escalares; el `default` de serde por sí solo no cubre ese caso, así
+/// que todos los campos con `#[serde(default)]` del modelo usan este helper.
 fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -23,14 +24,14 @@ pub struct CfResponse<T> {
     #[allow(dead_code)] // se expondrá para avisos del API (Fase 1+)
     pub messages: Vec<serde_json::Value>,
     pub result: Option<T>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)] // consumido al paginar listados (Fase 1+)
     pub result_info: Option<ResultInfo>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CfError {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)] // disponible para logging/depuración
     pub code: i64,
     pub message: String,
@@ -40,13 +41,13 @@ pub struct CfError {
 #[derive(Debug, Deserialize, Clone, Default)]
 #[allow(dead_code)] // consumido al paginar listados (Fase 1+)
 pub struct ResultInfo {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub page: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub per_page: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub total_count: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub total_pages: u32,
 }
 
@@ -71,17 +72,17 @@ pub struct Account {
 pub struct Zone {
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub status: String,
     /// Cuenta dueña de la zona (para filtrar por cuenta activa).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub account: Option<ZoneAccount>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ZoneAccount {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)] // nombre de la cuenta dueña; se puede mostrar más adelante
     pub name: String,
 }
@@ -100,16 +101,16 @@ pub struct DnsRecord {
     #[serde(rename = "type")]
     pub record_type: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub content: String,
     /// `Some(true/false)` en registros proxiables (A/AAAA/CNAME); `None` si no aplica.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub proxied: Option<bool>,
     /// TTL en segundos; `1` = automático.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub ttl: u32,
     /// Prioridad (MX/SRV); `None` para otros tipos.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub priority: Option<u32>,
 }
 
@@ -133,20 +134,20 @@ pub struct Tunnel {
     pub id: String,
     pub name: String,
     /// `inactive` | `down` | `degraded` | `healthy`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub status: String,
     /// Conexiones de conectores activas (vienen embebidas en el listado).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub connections: Vec<TunnelConnection>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct TunnelConnection {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub colo_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub origin_ip: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub client_version: String,
 }
 
@@ -154,7 +155,7 @@ pub struct TunnelConnection {
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkerScript {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub modified_on: String,
 }
 
@@ -183,10 +184,10 @@ impl WorkerMetrics {
 /// Versión desplegada dentro de un deployment (para rollback multi-versión).
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DeployVersion {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub version_id: String,
     /// Porcentaje de tráfico (soporta despliegues graduales, p. ej. 10.0).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub percentage: f64,
 }
 
@@ -195,36 +196,36 @@ pub struct DeployVersion {
 pub struct Deployment {
     #[allow(dead_code)] // id del deployment (informativo)
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub created_on: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub author_email: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub source: String,
     /// Versiones que sirve este deployment (para revertir preservando pesos).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub versions: Vec<DeployVersion>,
 }
 
 /// Ruta de zona que apunta a un Worker (`GET /zones/{id}/workers/routes`).
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct WorkerRoute {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub pattern: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub script: Option<String>,
 }
 
 /// Custom domain de Workers (`GET /accounts/{id}/workers/domains`).
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct WorkerDomain {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub hostname: String,
     /// Nombre del script asociado.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub service: String,
 }
 
@@ -234,15 +235,15 @@ pub struct Binding {
     pub name: String,
     #[serde(rename = "type")]
     pub btype: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub text: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub queue_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub namespace_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub bucket_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub database_id: Option<String>,
 }
 
@@ -274,13 +275,13 @@ pub struct D1Database {
     pub name: String,
     // Los contadores del listado son poco fiables (llegan a 0 con tablas reales);
     // se conservan para depuración pero no se muestran.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)]
     pub version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)]
     pub num_tables: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)]
     pub file_size: Option<u64>,
 }
@@ -315,13 +316,13 @@ impl QueryOutcome {
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct R2Bucket {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub creation_date: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub location: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub storage_class: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)] // no cabe en el panel compacto de info
     pub jurisdiction: Option<String>,
 }
@@ -329,11 +330,11 @@ pub struct R2Bucket {
 /// Uso de un bucket (`.../usage`). La API devuelve los tamaños como strings.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct R2Usage {
-    #[serde(rename = "payloadSize", default)]
+    #[serde(rename = "payloadSize", default, deserialize_with = "null_as_default")]
     pub payload_size: String,
-    #[serde(rename = "metadataSize", default)]
+    #[serde(rename = "metadataSize", default, deserialize_with = "null_as_default")]
     pub metadata_size: String,
-    #[serde(rename = "objectCount", default)]
+    #[serde(rename = "objectCount", default, deserialize_with = "null_as_default")]
     pub object_count: String,
 }
 
@@ -341,7 +342,7 @@ pub struct R2Usage {
 #[derive(Debug, Deserialize, Clone)]
 pub struct CustomDomain {
     pub domain: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub enabled: bool,
 }
 
@@ -349,9 +350,9 @@ pub struct CustomDomain {
 /// existe aunque `enabled` sea `false` (se pre-asigna al crear el bucket).
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct PublicDomain {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub domain: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub enabled: bool,
 }
 
@@ -371,17 +372,17 @@ impl R2Usage {
 #[derive(Debug, Deserialize, Clone)]
 pub struct R2Object {
     pub key: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub size: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub last_modified: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub http_metadata: Option<R2HttpMeta>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct R2HttpMeta {
-    #[serde(rename = "contentType", default)]
+    #[serde(rename = "contentType", default, deserialize_with = "null_as_default")]
     pub content_type: Option<String>,
 }
 
@@ -408,11 +409,11 @@ impl R2Object {
 /// Regla de ingress (`.../configurations`): hostname público → servicio local.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct IngressRule {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub hostname: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub service: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub path: Option<String>,
 }
 
@@ -437,17 +438,17 @@ pub struct Queue {
     /// pestaña Consumers usa `GET .../consumers` (settings completos).
     #[serde(default, deserialize_with = "null_as_default")]
     pub consumers: Vec<QueueConsumer>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub settings: QueueSettings,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct QueueSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub delivery_delay: Option<u64>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub delivery_paused: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub message_retention_period: Option<u64>,
 }
 
@@ -459,7 +460,7 @@ pub struct QueueProducer {
     /// El API usa `script` en unos endpoints y `script_name` en otros.
     #[serde(default, alias = "script")]
     pub script_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub bucket_name: Option<String>,
 }
 
@@ -473,9 +474,9 @@ pub struct QueueConsumer {
     pub ctype: String,
     #[serde(default, alias = "script")]
     pub script_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub dead_letter_queue: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub settings: ConsumerSettings,
 }
 
@@ -495,33 +496,33 @@ impl QueueConsumer {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ConsumerSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub batch_size: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub max_retries: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub retry_delay: Option<u64>,
     /// Solo consumers worker.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub max_concurrency: Option<u64>,
     /// Solo consumers worker.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub max_wait_time_ms: Option<u64>,
     /// Solo consumers http_pull.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub visibility_timeout_ms: Option<u64>,
 }
 
 /// Mensaje espiado vía `POST .../messages/pull` (peek: nunca se hace ack).
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct PulledMessage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub body: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub timestamp_ms: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub attempts: u64,
 }
 
@@ -539,7 +540,39 @@ pub struct QueueMetrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{CfResponse, Queue};
+    use super::{CfResponse, DnsRecord, Queue, R2Bucket, Tunnel, Zone};
+
+    /// El endurecimiento `null_as_default` es uniforme: cualquier campo escalar
+    /// o de lista con `#[serde(default)]` tolera `null` explícito, no solo la
+    /// familia Queues. Cubre DNS, zonas, túneles y buckets.
+    #[test]
+    fn null_explicito_tolerado_en_todos_los_modelos() {
+        let zone: Zone = serde_json::from_str(
+            r#"{"id":"z","name":"ej.com","status":null,"account":null}"#,
+        )
+        .expect("Zone tolera status/account null");
+        assert_eq!(zone.status, "");
+        assert!(zone.account_id().is_none());
+
+        let rec: DnsRecord = serde_json::from_str(
+            r#"{"id":"r","type":"A","name":"a.ej.com","content":null,"proxied":null,"ttl":null,"priority":null}"#,
+        )
+        .expect("DnsRecord tolera content/ttl null");
+        assert_eq!(rec.content, "");
+        assert_eq!(rec.ttl, 0);
+
+        let tunnel: Tunnel = serde_json::from_str(
+            r#"{"id":"t","name":"tun","status":null,"connections":null}"#,
+        )
+        .expect("Tunnel tolera status/connections null");
+        assert_eq!(tunnel.status, "");
+        assert!(tunnel.connections.is_empty());
+
+        let bucket: R2Bucket =
+            serde_json::from_str(r#"{"name":"b","creation_date":null}"#)
+                .expect("R2Bucket tolera creation_date null");
+        assert_eq!(bucket.name, "b");
+    }
 
     /// El API real de Queues manda `null` explícito (no el campo ausente) en
     /// `producers`/`consumers`/contadores/fechas/booleanos cuando están vacíos

@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::model::{IngressRule, Tunnel};
 use crate::ui::theme;
+use crate::ui::widgets::{placeholder, row_at, select_wrap};
 
 #[derive(Default)]
 pub struct TunnelsView {
@@ -61,27 +62,12 @@ impl TunnelsView {
 
     /// Selecciona un túnel por fila relativa (click); `true` si cambió.
     pub fn tunnel_at(&mut self, rel: usize) -> bool {
-        let idx = rel + self.state.offset();
-        if idx >= self.tunnels.len() {
-            return false;
-        }
-        let changed = self.state.selected() != Some(idx);
-        self.state.select(Some(idx));
-        changed
+        row_at(&mut self.state, self.tunnels.len(), rel)
     }
 
     /// Mueve la selección; `true` si cambió.
     pub fn select(&mut self, delta: i32) -> bool {
-        let len = self.tunnels.len();
-        if len == 0 {
-            return false;
-        }
-        let cur = self.state.selected().unwrap_or(0) as i32;
-        let n = len as i32;
-        let next = (((cur + delta) % n) + n) % n;
-        let changed = next != cur;
-        self.state.select(Some(next as usize));
-        changed
+        select_wrap(&mut self.state, self.tunnels.len(), delta)
     }
 
     pub fn begin_loading_ingress(&mut self) {
@@ -115,26 +101,13 @@ impl TunnelsView {
     /// Mueve la selección de ruta; `true` si cambió.
     pub fn select_route(&mut self, delta: i32) -> bool {
         let len = self.hostname_rules().len();
-        if len == 0 {
-            return false;
-        }
-        let cur = self.route_state.selected().unwrap_or(0) as i32;
-        let n = len as i32;
-        let next = (((cur + delta) % n) + n) % n;
-        let changed = next != cur;
-        self.route_state.select(Some(next as usize));
-        changed
+        select_wrap(&mut self.route_state, len, delta)
     }
 
     /// Selecciona una ruta por fila relativa (click); `true` si cambió.
     pub fn route_at(&mut self, rel: usize) -> bool {
-        let idx = rel + self.route_state.offset();
-        if idx >= self.hostname_rules().len() {
-            return false;
-        }
-        let changed = self.route_state.selected() != Some(idx);
-        self.route_state.select(Some(idx));
-        changed
+        let len = self.hostname_rules().len();
+        row_at(&mut self.route_state, len, rel)
     }
 
     // --- Render ---
@@ -377,11 +350,4 @@ fn status_label(status: &str) -> String {
         other => other,
     }
     .to_string()
-}
-
-fn placeholder<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
-    Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
 }

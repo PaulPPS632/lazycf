@@ -14,6 +14,7 @@ use ratatui::Frame;
 use crate::components::input::TextInput;
 use crate::model::{D1Database, QueryOutcome};
 use crate::ui::theme;
+use crate::ui::widgets::{dim, dim_line, placeholder, row_at, select_wrap};
 
 /// Keywords SQL ofrecidas por el autocompletado (en MAYÚSCULA).
 const SQL_KEYWORDS: &[&str] = &[
@@ -124,11 +125,11 @@ impl D1View {
     }
 
     pub fn select_db(&mut self, delta: i32) -> bool {
-        select_in(&mut self.db_state, self.databases.len(), delta)
+        select_wrap(&mut self.db_state, self.databases.len(), delta)
     }
 
     pub fn db_at(&mut self, rel: usize) -> bool {
-        at_row(&mut self.db_state, self.databases.len(), rel)
+        row_at(&mut self.db_state, self.databases.len(), rel)
     }
 
     // --- Tablas ---
@@ -173,11 +174,11 @@ impl D1View {
     }
 
     pub fn select_table(&mut self, delta: i32) -> bool {
-        select_in(&mut self.table_state, self.tables.len(), delta)
+        select_wrap(&mut self.table_state, self.tables.len(), delta)
     }
 
     pub fn table_at(&mut self, rel: usize) -> bool {
-        at_row(&mut self.table_state, self.tables.len(), rel)
+        row_at(&mut self.table_state, self.tables.len(), rel)
     }
 
     // --- Editor SQL ---
@@ -428,15 +429,15 @@ impl D1View {
     pub fn draw_dbs(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let block = panel(" Bases D1 ", focused);
         if self.loading {
-            frame.render_widget(dim_block("Cargando bases…", block), area);
+            frame.render_widget(placeholder("Cargando bases…", block), area);
             return;
         }
         if let Some(e) = &self.error {
-            frame.render_widget(dim_block(&format!("✗ {e}"), block), area);
+            frame.render_widget(placeholder(&format!("✗ {e}"), block), area);
             return;
         }
         if self.databases.is_empty() {
-            frame.render_widget(dim_block("Sin bases de datos", block), area);
+            frame.render_widget(placeholder("Sin bases de datos", block), area);
             return;
         }
         let items: Vec<ListItem> = self
@@ -451,19 +452,19 @@ impl D1View {
     pub fn draw_tables(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let block = panel(" Tablas ", focused);
         if self.selected_db().is_none() {
-            frame.render_widget(dim_block("Selecciona una base", block), area);
+            frame.render_widget(placeholder("Selecciona una base", block), area);
             return;
         }
         if self.loading_tables {
-            frame.render_widget(dim_block("Cargando tablas…", block), area);
+            frame.render_widget(placeholder("Cargando tablas…", block), area);
             return;
         }
         if let Some(e) = &self.tables_error {
-            frame.render_widget(dim_block(&format!("✗ {e}"), block), area);
+            frame.render_widget(placeholder(&format!("✗ {e}"), block), area);
             return;
         }
         if self.tables.is_empty() {
-            frame.render_widget(dim_block("Sin tablas", block), area);
+            frame.render_widget(placeholder("Sin tablas", block), area);
             return;
         }
         let items: Vec<ListItem> = self
@@ -746,28 +747,6 @@ fn list_widget<'a>(items: Vec<ListItem<'a>>, block: Block<'a>) -> List<'a> {
         .block(block)
         .highlight_style(theme::selection())
         .highlight_symbol("▶ ")
-}
-
-fn select_in(state: &mut ListState, len: usize, delta: i32) -> bool {
-    if len == 0 {
-        return false;
-    }
-    let cur = state.selected().unwrap_or(0) as i32;
-    let n = len as i32;
-    let next = ((((cur + delta) % n) + n) % n) as usize;
-    let changed = state.selected() != Some(next);
-    state.select(Some(next));
-    changed
-}
-
-fn at_row(state: &mut ListState, len: usize, rel: usize) -> bool {
-    let idx = rel + state.offset();
-    if idx >= len {
-        return false;
-    }
-    let changed = state.selected() != Some(idx);
-    state.select(Some(idx));
-    changed
 }
 
 // --- Autocompletado: contexto ---
@@ -1166,23 +1145,6 @@ fn grid_lines(
         lines.push(rule_line(w, vis_cols, sep));
     }
     lines
-}
-
-fn dim(text: &str) -> Paragraph<'_> {
-    Paragraph::new(text)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
-}
-
-fn dim_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), Style::default().fg(theme::DIM)))
-}
-
-fn dim_block<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
-    Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
 }
 
 #[cfg(test)]

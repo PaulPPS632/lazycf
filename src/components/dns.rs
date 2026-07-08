@@ -4,12 +4,13 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+    Block, Cell, List, ListItem, ListState, Row, Table, TableState,
 };
 use ratatui::Frame;
 
 use crate::model::{DnsRecord, Zone};
 use crate::ui::theme;
+use crate::ui::widgets::placeholder;
 
 #[derive(Default)]
 pub struct DnsView {
@@ -187,13 +188,6 @@ fn zone_line(z: &Zone) -> Line<'static> {
         ));
     }
     Line::from(spans)
-}
-
-fn placeholder<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
-    Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
 }
 
 /// Celda de la columna PROXY según proxiabilidad y estado.

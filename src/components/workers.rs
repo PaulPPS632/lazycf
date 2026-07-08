@@ -10,23 +10,8 @@ use ratatui::Frame;
 use crate::api::workers::TailEvent;
 use crate::components::input::TextInput;
 use crate::model::{Binding, Deployment, WorkerMetrics, WorkerScript};
-use crate::ui::theme;
-
-/// Estado de carga de un dato asíncrono.
-#[derive(Default)]
-pub enum Loadable<T> {
-    #[default]
-    Idle,
-    Loading,
-    Failed,
-    Ready(T),
-}
-
-impl<T> Loadable<T> {
-    pub fn is_idle(&self) -> bool {
-        matches!(self, Loadable::Idle)
-    }
-}
+use crate::ui::widgets::{dim, dim_line, metric_line, placeholder, short_date, tab_bar};
+use crate::ui::{theme, Loadable};
 
 pub const TABS: [&str; 5] = [
     "Métricas",
@@ -456,7 +441,7 @@ impl WorkersView {
         // El título se calcula antes de tomar `&mut self` en los draws.
         let title = match self.selected() {
             Some(s) if !s.modified_on.is_empty() => {
-                format!(" {} · mod {} ", s.id, short_date(&s.modified_on))
+                format!(" {} · mod {} ", s.id, short_date(&s.modified_on, 16))
             }
             Some(s) => format!(" {} ", s.id),
             None => " Detalle ".to_string(),
@@ -480,7 +465,7 @@ impl WorkersView {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
             .split(inner);
-        frame.render_widget(self.tab_bar(), rows[0]);
+        frame.render_widget(tab_bar(&TABS, self.active_tab), rows[0]);
         // rows[1] queda como separador visual.
 
         match self.active_tab {
@@ -490,24 +475,6 @@ impl WorkersView {
             3 => self.draw_logs(frame, rows[2], filter_focused),
             _ => self.draw_routing(frame, rows[2]),
         }
-    }
-
-    fn tab_bar(&self) -> Line<'static> {
-        let mut spans = Vec::new();
-        for (i, t) in TABS.iter().enumerate() {
-            let style = if i == self.active_tab {
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(ratatui::style::Modifier::BOLD)
-            } else {
-                Style::default().fg(theme::DIM)
-            };
-            spans.push(Span::styled(format!(" {} {} ", i + 1, t), style));
-            if i + 1 < TABS.len() {
-                spans.push(Span::styled("·", Style::default().fg(theme::DIM)));
-            }
-        }
-        Line::from(spans)
     }
 
     fn draw_metrics(&self, frame: &mut Frame, area: Rect) {
@@ -525,14 +492,14 @@ impl WorkersView {
                     .split(area);
                 let rate = m.error_rate();
                 let lines = vec![
-                    metric_line("Requests", &m.requests.to_string()),
-                    metric_line("Errores", &m.errors.to_string()),
+                    metric_line("Requests", &m.requests.to_string(), 12),
+                    metric_line("Errores", &m.errors.to_string(), 12),
                     Line::from(vec![
                         Span::styled(format!("{:<12}", "Tasa error"), Style::default().fg(theme::DIM)),
                         Span::styled(format!("{rate:.2}%"), Style::default().fg(rate_color(rate))),
                     ]),
-                    metric_line("CPU p50", &format!("{:.0} µs", m.cpu_p50)),
-                    metric_line("CPU p99", &format!("{:.0} µs", m.cpu_p99)),
+                    metric_line("CPU p50", &format!("{:.0} µs", m.cpu_p50), 12),
+                    metric_line("CPU p99", &format!("{:.0} µs", m.cpu_p99), 12),
                     Line::from(Span::styled(
                         "requests / hora (24h):",
                         Style::default().fg(theme::DIM),
@@ -570,7 +537,7 @@ impl WorkersView {
                     .enumerate()
                     .map(|(i, dep)| {
                         let mut spans = vec![
-                            Span::raw(short_date(&dep.created_on)),
+                            Span::raw(short_date(&dep.created_on, 16)),
                             Span::styled(
                                 format!("  {}", dep.author_email),
                                 Style::default().fg(theme::FG),
@@ -763,13 +730,6 @@ pub fn split(main: Rect) -> (Rect, Rect) {
     (cols[0], cols[1])
 }
 
-fn metric_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<12}"), Style::default().fg(theme::DIM)),
-        Span::styled(value.to_string(), Style::default().fg(theme::FG)),
-    ])
-}
-
 fn rate_color(rate: f64) -> ratatui::style::Color {
     if rate < 1.0 {
         theme::OK
@@ -778,29 +738,4 @@ fn rate_color(rate: f64) -> ratatui::style::Color {
     } else {
         theme::ERROR
     }
-}
-
-pub fn short_date(iso: &str) -> String {
-    if iso.len() >= 16 {
-        iso[..16].replace('T', " ")
-    } else {
-        iso.to_string()
-    }
-}
-
-fn dim(text: &str) -> Paragraph<'_> {
-    Paragraph::new(text)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
-}
-
-fn dim_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), Style::default().fg(theme::DIM)))
-}
-
-fn placeholder<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
-    Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::DIM))
-        .wrap(Wrap { trim: true })
 }
