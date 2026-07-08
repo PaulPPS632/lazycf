@@ -257,6 +257,10 @@ impl App {
         // route_focus_key (Enter ejecuta/aplica, texto edita el input).
         if matches!(self.focus, Focus::D1Editor | Focus::D1Where) {
             match key.code {
+                // Con el popup de sugerencias abierto, Tab acepta en vez de salir.
+                KeyCode::Tab if self.focus == Focus::D1Editor && self.d1.suggestions_open() => {
+                    self.d1.accept_suggestion();
+                }
                 KeyCode::Tab => self.dispatch(Action::CycleFocus { back: false }),
                 KeyCode::BackTab => self.dispatch(Action::CycleFocus { back: true }),
                 _ => self.route_focus_key(key),
@@ -602,20 +606,48 @@ impl App {
             // Editor SQL: teclas normales escriben; F5/Ctrl+Enter ejecuta.
             Focus::D1Editor => match key.code {
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.d1.close_suggestions();
                     self.run_editor()
                 }
-                KeyCode::F(5) => self.run_editor(),
+                KeyCode::F(5) => {
+                    self.d1.close_suggestions();
+                    self.run_editor()
+                }
+                // Ctrl+Espacio: fuerza el popup de sugerencias.
+                KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.d1.update_suggestions(true)
+                }
+                KeyCode::Enter if self.d1.suggestions_open() => self.d1.accept_suggestion(),
+                KeyCode::Esc if self.d1.suggestions_open() => self.d1.close_suggestions(),
+                KeyCode::Up if self.d1.suggestions_open() => self.d1.sug_move(-1),
+                KeyCode::Down if self.d1.suggestions_open() => self.d1.sug_move(1),
                 KeyCode::Enter => self.d1.editor_mut().insert('\n'),
-                KeyCode::Backspace => self.d1.editor_mut().backspace(),
+                KeyCode::Backspace => {
+                    self.d1.editor_mut().backspace();
+                    self.d1.update_suggestions(false);
+                }
                 KeyCode::Delete => self.d1.editor_mut().delete(),
-                KeyCode::Left => self.d1.editor_mut().left(),
-                KeyCode::Right => self.d1.editor_mut().right(),
+                KeyCode::Left => {
+                    self.d1.close_suggestions();
+                    self.d1.editor_mut().left()
+                }
+                KeyCode::Right => {
+                    self.d1.close_suggestions();
+                    self.d1.editor_mut().right()
+                }
                 KeyCode::Up => self.d1.editor_mut().up(),
                 KeyCode::Down => self.d1.editor_mut().down(),
-                KeyCode::Home => self.d1.editor_mut().home(),
-                KeyCode::End => self.d1.editor_mut().end(),
+                KeyCode::Home => {
+                    self.d1.close_suggestions();
+                    self.d1.editor_mut().home()
+                }
+                KeyCode::End => {
+                    self.d1.close_suggestions();
+                    self.d1.editor_mut().end()
+                }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.d1.editor_mut().insert(c)
+                    self.d1.editor_mut().insert(c);
+                    self.d1.update_suggestions(false);
                 }
                 _ => {}
             },
@@ -1624,8 +1656,12 @@ impl App {
                     self.load_tables(db_id);
                 }
             }
-            Action::D1TablesLoaded { db_id, tables } => {
-                self.d1.set_tables(&db_id, tables);
+            Action::D1TablesLoaded {
+                db_id,
+                tables,
+                schema,
+            } => {
+                self.d1.set_tables(&db_id, tables, schema);
                 // Muestra el esquema de la primera tabla automáticamente.
                 if self.d1.selected_db_id().as_deref() == Some(db_id.as_str())
                     && self.d1.selected_table().is_some()
@@ -2804,14 +2840,31 @@ impl App {
         };
         self.d1.begin_tables(db_id.clone());
         let tx = self.action_tx.clone();
-        let sql = "SELECT name FROM sqlite_master WHERE type IN ('table','view') \
+        // `sql` (el CREATE) alimenta el autocompletado de columnas del editor.
+        let sql = "SELECT name, sql FROM sqlite_master WHERE type IN ('table','view') \
                    AND name NOT LIKE 'sqlite_%' ORDER BY name";
         tokio::spawn(async move {
             let action = match client.d1_query(&account_id, &db_id, sql).await {
-                Ok(o) => Action::D1TablesLoaded {
-                    db_id,
-                    tables: o.rows.into_iter().filter_map(|mut r| r.drain(..1).next()).collect(),
-                },
+                Ok(o) => {
+                    let mut tables = Vec::new();
+                    let mut schema = std::collections::HashMap::new();
+                    for row in o.rows {
+                        let Some(name) = row.first().cloned() else {
+                            continue;
+                        };
+                        let cols = row
+                            .get(1)
+                            .map(|c| crate::api::d1::parse_create_columns(c))
+                            .unwrap_or_default();
+                        schema.insert(name.clone(), cols);
+                        tables.push(name);
+                    }
+                    Action::D1TablesLoaded {
+                        db_id,
+                        tables,
+                        schema,
+                    }
+                }
                 Err(e) => Action::D1TablesError(e.to_string()),
             };
             let _ = tx.send(action);
@@ -3339,7 +3392,10 @@ impl App {
                 vec![
                     ("F5 / Ctrl+Enter", "ejecutar la consulta"),
                     ("Enter", "salto de línea"),
-                    ("(texto)", "escribe SQL libremente"),
+                    ("(texto)", "escribe SQL · sugiere al teclear"),
+                    ("Ctrl+Espacio", "abrir sugerencias"),
+                    ("Tab / Enter", "aceptar sugerencia (popup abierto)"),
+                    ("↑ ↓ / Esc", "navegar / cerrar sugerencias"),
                 ],
             ),
             Focus::D1Where => HelpSection::new(
@@ -3539,7 +3595,9 @@ impl App {
                 }
                 Focus::D1Dbs => "↑↓ base · Tab → editor · r recargar · A · ? ayuda".into(),
                 Focus::D1Tables => "↑↓ tabla · Enter SELECT * · Tab → editor · r · ?".into(),
-                Focus::D1Editor => "escribe SQL · F5/Ctrl+Enter ejecutar · Tab → · ?".into(),
+                Focus::D1Editor => {
+                    "escribe SQL · Ctrl+Espacio sugerir · F5 ejecutar · Tab → · ?".into()
+                }
                 Focus::D1Where => "escribe filtro WHERE · Enter aplicar · Tab → · ?".into(),
                 Focus::D1Results => {
                     "↑↓←→ celda · Enter ver · y copiar · Y fila · PgUp/Dn · Tab →".into()

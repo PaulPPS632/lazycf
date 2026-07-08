@@ -3,15 +3,39 @@
 //!   col.3 = editor SQL (arriba) / tabla de resultados (abajo)
 //! Las tablas salen de `sqlite_master`; los resultados de `POST .../raw`.
 
+use std::collections::HashMap;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::components::input::TextInput;
 use crate::model::{D1Database, QueryOutcome};
 use crate::ui::theme;
+
+/// Keywords SQL ofrecidas por el autocompletado (en MAYÚSCULA).
+const SQL_KEYWORDS: &[&str] = &[
+    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN",
+    "EXISTS", "INSERT INTO", "VALUES", "UPDATE", "SET", "DELETE FROM", "CREATE TABLE",
+    "DROP TABLE", "ALTER TABLE", "JOIN", "LEFT JOIN", "INNER JOIN", "CROSS JOIN", "ON", "AS",
+    "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "DISTINCT", "ASC", "DESC", "CASE",
+    "WHEN", "THEN", "ELSE", "END", "UNION", "PRAGMA", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX(",
+];
+
+/// Tipo de sugerencia (define color y prioridad contextual).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SugKind {
+    Keyword,
+    Table,
+    Column,
+}
+
+pub struct Suggestion {
+    pub text: String,
+    pub kind: SugKind,
+}
 
 /// Estado del panel de resultados.
 #[derive(Default)]
@@ -43,6 +67,11 @@ pub struct D1View {
     /// Editor SQL (multilínea, con cursor).
     sql: TextInput,
     pub running: bool,
+    /// Esquema (tabla → columnas) para el autocompletado.
+    schema: HashMap<String, Vec<String>>,
+    /// Sugerencias visibles y su selección.
+    suggestions: Vec<Suggestion>,
+    sug_idx: usize,
     result: D1Panel,
     /// Celda seleccionada en la rejilla de resultados.
     sel_row: usize,
@@ -110,13 +139,21 @@ impl D1View {
         self.tables.clear();
         self.table_state.select(None);
         self.current_db = Some(db_id);
+        self.schema.clear();
+        self.close_suggestions();
     }
 
-    pub fn set_tables(&mut self, db_id: &str, tables: Vec<String>) {
+    pub fn set_tables(
+        &mut self,
+        db_id: &str,
+        tables: Vec<String>,
+        schema: HashMap<String, Vec<String>>,
+    ) {
         if self.current_db.as_deref() != Some(db_id) {
             return;
         }
         self.tables = tables;
+        self.schema = schema;
         self.loading_tables = false;
         self.tables_error = None;
         self.table_state
@@ -157,6 +194,152 @@ impl D1View {
     /// Rellena el editor (p. ej. al pulsar Enter sobre una tabla).
     pub fn set_sql(&mut self, sql: String) {
         self.sql.set(sql);
+        self.close_suggestions();
+    }
+
+    // --- Autocompletado ---
+
+    pub fn suggestions_open(&self) -> bool {
+        !self.suggestions.is_empty()
+    }
+
+    pub fn close_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.sug_idx = 0;
+    }
+
+    pub fn sug_move(&mut self, delta: i32) {
+        let n = self.suggestions.len() as i32;
+        if n == 0 {
+            return;
+        }
+        self.sug_idx = ((((self.sug_idx as i32 + delta) % n) + n) % n) as usize;
+    }
+
+    /// Inserta la sugerencia seleccionada reemplazando la palabra actual.
+    pub fn accept_suggestion(&mut self) {
+        if let Some(s) = self.suggestions.get(self.sug_idx) {
+            let text = s.text.clone();
+            self.sql.replace_word_before_cursor(&text);
+            self.close_suggestions();
+        }
+    }
+
+    /// Recalcula las sugerencias para la palabra bajo el cursor.
+    /// `forced` (Ctrl+Espacio) abre el popup aunque la palabra esté vacía.
+    pub fn update_suggestions(&mut self, forced: bool) {
+        let word = self.sql.word_before_cursor();
+
+        // "alias." → solo columnas de la tabla/subquery referenciada (vía
+        // FROM/JOIN ... alias, o directamente "tabla." sin alias). Señal
+        // inequívoca: se evalúa antes del corte por palabra vacía (no
+        // requiere Ctrl+Espacio).
+        if let Some(alias) = self.sql.alias_before_cursor() {
+            let tokens = tokenize(self.sql.value());
+            let alias_cols = extract_alias_columns(&tokens, &self.schema);
+            let cols = alias_cols
+                .get(&alias.to_lowercase())
+                .cloned()
+                .or_else(|| schema_columns(&self.schema, &alias).cloned());
+            let wl = word.to_lowercase();
+            self.suggestions = cols
+                .map(|cols| {
+                    let mut v: Vec<&String> = cols
+                        .iter()
+                        .filter(|c| wl.is_empty() || c.to_lowercase().starts_with(&wl))
+                        .collect();
+                    v.sort();
+                    v.into_iter()
+                        .take(8)
+                        .map(|c| Suggestion {
+                            text: c.clone(),
+                            kind: SugKind::Column,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.sug_idx = 0;
+            return;
+        }
+
+        if word.is_empty() && !forced {
+            self.close_suggestions();
+            return;
+        }
+
+        // Contexto: texto antes de la palabra actual.
+        let chars: Vec<char> = self.sql.value().chars().collect();
+        let end = self.sql.cursor().min(chars.len());
+        let before: String = chars[..end - word.chars().count()].iter().collect();
+        let ctx = context_kind(&before);
+
+        // Columnas: de las tablas mencionadas en el SQL; si ninguna, de todas.
+        let text_lower = self.sql.value().to_lowercase();
+        let mentioned: Vec<&String> = self
+            .schema
+            .keys()
+            .filter(|t| text_lower.contains(&t.to_lowercase()))
+            .collect();
+        let mut columns: Vec<&String> = if mentioned.is_empty() {
+            self.schema.values().flatten().collect()
+        } else {
+            mentioned
+                .iter()
+                .filter_map(|t| self.schema.get(*t))
+                .flatten()
+                .collect()
+        };
+        columns.sort();
+        columns.dedup();
+
+        let wl = word.to_lowercase();
+        let matches = |s: &str| wl.is_empty() || s.to_lowercase().starts_with(&wl);
+        let mut out: Vec<Suggestion> = Vec::new();
+        if ctx != Ctx::Tables {
+            out.extend(columns.iter().filter(|c| matches(c)).map(|c| Suggestion {
+                text: (*c).clone(),
+                kind: SugKind::Column,
+            }));
+        }
+        out.extend(self.tables.iter().filter(|t| matches(t)).map(|t| Suggestion {
+            text: t.clone(),
+            kind: SugKind::Table,
+        }));
+        if ctx != Ctx::Tables {
+            out.extend(
+                SQL_KEYWORDS
+                    .iter()
+                    .filter(|k| matches(k))
+                    .map(|k| Suggestion {
+                        text: (*k).to_string(),
+                        kind: SugKind::Keyword,
+                    }),
+            );
+        }
+
+        // Prioridad por contexto, alfabético dentro de cada tipo.
+        let rank = |k: SugKind| match (ctx, k) {
+            (Ctx::Tables, SugKind::Table) => 0,
+            (Ctx::Columns, SugKind::Column) => 0,
+            (Ctx::Columns, SugKind::Keyword) => 1,
+            (Ctx::Columns, SugKind::Table) => 2,
+            (Ctx::Any, SugKind::Keyword) => 0,
+            (Ctx::Any, SugKind::Table) => 1,
+            (Ctx::Any, SugKind::Column) => 2,
+            _ => 3,
+        };
+        out.sort_by(|a, b| {
+            rank(a.kind)
+                .cmp(&rank(b.kind))
+                .then_with(|| a.text.to_lowercase().cmp(&b.text.to_lowercase()))
+        });
+        // No molestar si lo escrito ya es la única sugerencia exacta.
+        if out.len() == 1 && out[0].text.eq_ignore_ascii_case(&word) {
+            out.clear();
+        }
+        out.truncate(8);
+        self.suggestions = out;
+        self.sug_idx = 0;
     }
 
     // --- Resultados ---
@@ -323,11 +506,78 @@ impl D1View {
             Span::styled("Ejecutando…", Style::default().fg(theme::ACCENT))
         } else {
             Span::styled(
-                "F5 / Ctrl+Enter ejecutar · Enter salto de línea",
+                "F5 / Ctrl+Enter ejecutar · Ctrl+Espacio sugerir",
                 Style::default().fg(theme::DIM),
             )
         };
         frame.render_widget(Paragraph::new(Line::from(hint)), rows[1]);
+
+        // Popup de autocompletado anclado bajo el cursor (estilo IDE; puede
+        // solapar el panel de abajo).
+        if focused && self.suggestions_open() {
+            self.draw_suggestions(frame, rows[0]);
+        }
+    }
+
+    /// Overlay de sugerencias en coordenadas absolutas del frame.
+    fn draw_suggestions(&self, frame: &mut Frame, text_area: Rect) {
+        let screen = frame.area();
+        let (line, col) = self.sql.line_col();
+        let word_len = self.sql.word_before_cursor().chars().count();
+
+        let width = self
+            .suggestions
+            .iter()
+            .map(|s| s.text.chars().count())
+            .max()
+            .unwrap_or(0) as u16
+            + 2;
+        let height = self.suggestions.len() as u16;
+
+        let anchor_x = text_area.x + (col.saturating_sub(word_len)) as u16;
+        let x = anchor_x.min(screen.right().saturating_sub(width.min(screen.width)));
+        let below = text_area.y + line as u16 + 1;
+        let y = if below + height <= screen.bottom() {
+            below
+        } else {
+            // No cabe abajo: encima de la línea del cursor.
+            (text_area.y + line as u16).saturating_sub(height)
+        };
+        let rect = Rect::new(
+            x,
+            y,
+            width.min(screen.width),
+            height.min(screen.height),
+        )
+        .intersection(screen);
+        if rect.is_empty() {
+            return;
+        }
+
+        let lines: Vec<Line> = self
+            .suggestions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let color = match s.kind {
+                    SugKind::Keyword => theme::ACCENT,
+                    SugKind::Table => theme::OK,
+                    SugKind::Column => theme::FG,
+                };
+                let style = if i == self.sug_idx {
+                    theme::selection()
+                } else {
+                    Style::default().fg(color)
+                };
+                let pad = (rect.width as usize).saturating_sub(s.text.chars().count() + 1);
+                Line::from(Span::styled(
+                    format!(" {}{}", s.text, " ".repeat(pad)),
+                    style,
+                ))
+            })
+            .collect();
+        frame.render_widget(Clear, rect);
+        frame.render_widget(Paragraph::new(lines), rect);
     }
 
     /// Barra WHERE: filtra los resultados de la tabla actual.
@@ -520,6 +770,294 @@ fn at_row(state: &mut ListState, len: usize, rel: usize) -> bool {
     changed
 }
 
+// --- Autocompletado: contexto ---
+
+/// Qué priorizar según lo que precede a la palabra actual.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ctx {
+    /// Tras FROM/JOIN/INTO/UPDATE/TABLE: solo tablas.
+    Tables,
+    /// Tras SELECT/WHERE/ON/BY/SET… o coma/paréntesis: columnas primero.
+    Columns,
+    /// Sin pista: keywords primero.
+    Any,
+}
+
+/// Separa en palabras (`[A-Za-z0-9_]+`) y símbolos sueltos (cualquier otro
+/// carácter no-espacio, cada uno su propio token). Distingue `FROM a, b`
+/// (token `,` entre `a` y `b`) de `FROM documents d` (alias real).
+fn tokenize(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    for c in sql.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            cur.push(c);
+            continue;
+        }
+        if !cur.is_empty() {
+            tokens.push(std::mem::take(&mut cur));
+        }
+        if !c.is_whitespace() {
+            tokens.push(c.to_string());
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// Palabras que, si aparecen justo tras una tabla, indican que NO hay alias
+/// (la tabla se usa sola y lo que sigue es la siguiente cláusula).
+const RESERVED_AFTER_TABLE: &[&str] = &[
+    "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "JOIN", "LEFT", "RIGHT", "INNER",
+    "CROSS", "FULL", "OUTER", "ON", "UNION", "SET", "AND", "OR", "VALUES", "RETURNING", "AS",
+];
+
+fn is_word(t: &str) -> bool {
+    t.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Columnas de `table` en `schema`, comparando el nombre case-insensitive.
+fn schema_columns<'a>(schema: &'a HashMap<String, Vec<String>>, table: &str) -> Option<&'a Vec<String>> {
+    schema.iter().find(|(k, _)| k.eq_ignore_ascii_case(table)).map(|(_, v)| v)
+}
+
+/// Índice del `)` que cierra el `(` en `open` (tokens ya balanceados).
+fn matching_paren(tokens: &[String], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate().skip(open) {
+        match t.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Nombre de columna/alias de un segmento de lista SELECT (best-effort):
+/// alias explícito tras `AS`; si no, dos palabras seguidas al final
+/// (`precio total` → `total`); si no, el último identificador del segmento
+/// (`t.nombre` → `nombre`; `COUNT(id)` → `id`, imperfecto pero inofensivo).
+fn column_alias(seg: &[&String]) -> Option<String> {
+    if seg.is_empty() {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, t) in seg.iter().enumerate() {
+        match t.as_str() {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ if depth == 0 && t.eq_ignore_ascii_case("AS") => {
+                return seg.get(i + 1).map(|s| (*s).clone());
+            }
+            _ => {}
+        }
+    }
+    if seg.len() >= 2 && is_word(seg[seg.len() - 1]) && is_word(seg[seg.len() - 2]) {
+        return Some(seg[seg.len() - 1].clone());
+    }
+    seg.iter().rev().find(|t| is_word(t)).map(|s| (*s).clone())
+}
+
+/// Tablas nombradas tras FROM/JOIN en `tokens` (ignora subqueries anidadas:
+/// si tras FROM/JOIN viene `(`, no es un nombre de tabla y se salta).
+fn referenced_tables(tokens: &[String]) -> Vec<String> {
+    let mut tables = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        let kw = t.to_uppercase();
+        if (kw == "FROM" || kw == "JOIN") && tokens.get(i + 1).is_some_and(|n| is_word(n)) {
+            tables.push(tokens[i + 1].clone());
+        }
+    }
+    tables
+}
+
+/// Unión (deduplicada, en orden) de las columnas de las tablas referenciadas.
+fn referenced_columns(tokens: &[String], schema: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut cols = Vec::new();
+    for t in referenced_tables(tokens) {
+        if let Some(found) = schema_columns(schema, &t) {
+            for c in found {
+                if !cols.contains(c) {
+                    cols.push(c.clone());
+                }
+            }
+        }
+    }
+    cols
+}
+
+/// Añade las columnas de un segmento de lista SELECT (`t.*` expande a todas
+/// las columnas de `t` — tabla real o alias local del FROM interno—; el
+/// resto aporta una sola columna).
+fn push_segment_columns(
+    seg: &[&String],
+    schema: &HashMap<String, Vec<String>>,
+    local_aliases: &HashMap<String, Vec<String>>,
+    out: &mut Vec<String>,
+) {
+    if seg.len() >= 3 && seg[seg.len() - 1] == "*" && seg[seg.len() - 2] == "." {
+        let name = seg[seg.len() - 3];
+        if let Some(found) = schema_columns(schema, name) {
+            out.extend(found.iter().cloned());
+        } else if let Some(found) = local_aliases.get(&name.to_lowercase()) {
+            out.extend(found.iter().cloned());
+        }
+        return;
+    }
+    if let Some(name) = column_alias(seg) {
+        out.push(name);
+    }
+}
+
+/// Columnas de salida de un SELECT interno (el contenido entre los paréntesis
+/// de una subquery en FROM/JOIN). Best-effort: `SELECT *` expande con las
+/// tablas del FROM interno; el resto, un nombre por columna de la lista.
+fn subquery_columns(tokens: &[String], schema: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let Some(select_at) = tokens.iter().position(|t| t.eq_ignore_ascii_case("SELECT")) else {
+        return Vec::new();
+    };
+    let mut depth = 0i32;
+    let mut from_at = None;
+    for (i, t) in tokens.iter().enumerate().skip(select_at + 1) {
+        match t.as_str() {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ if depth == 0 && t.eq_ignore_ascii_case("FROM") => {
+                from_at = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let list = &tokens[select_at + 1..from_at.unwrap_or(tokens.len())];
+
+    if list.len() == 1 && list[0] == "*" {
+        return from_at
+            .map(|f| referenced_columns(&tokens[f..], schema))
+            .unwrap_or_default();
+    }
+
+    // Alias locales del FROM interno (p. ej. "documents d"): necesarios para
+    // resolver "d.*" en la lista de columnas, donde `d` no es un nombre real.
+    let local_aliases = from_at
+        .map(|f| extract_alias_columns(&tokens[f..], schema))
+        .unwrap_or_default();
+
+    let mut cols = Vec::new();
+    let mut depth = 0i32;
+    let mut seg: Vec<&String> = Vec::new();
+    for t in list {
+        match t.as_str() {
+            "(" => {
+                depth += 1;
+                seg.push(t);
+            }
+            ")" => {
+                depth -= 1;
+                seg.push(t);
+            }
+            "," if depth == 0 => {
+                push_segment_columns(&seg, schema, &local_aliases, &mut cols);
+                seg.clear();
+            }
+            _ => seg.push(t),
+        }
+    }
+    push_segment_columns(&seg, schema, &local_aliases, &mut cols);
+    cols
+}
+
+/// Alias (de tabla real o de subquery) → columnas, escaneando `FROM`/`JOIN`
+/// seguidos de `tabla [AS] alias` o `( SELECT … ) [AS] alias`. Best-effort
+/// (sin parser SQL real): ignora `FROM a, b` (el token tras la tabla es `,`,
+/// no una palabra) y cualquier cláusula que venga justo después de la tabla
+/// (WHERE, GROUP BY, otro JOIN…).
+fn extract_alias_columns(
+    tokens: &[String],
+    schema: &HashMap<String, Vec<String>>,
+) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let kw = tokens[i].to_uppercase();
+        if kw != "FROM" && kw != "JOIN" {
+            i += 1;
+            continue;
+        }
+
+        if tokens.get(i + 1).map(String::as_str) == Some("(") {
+            let Some(close) = matching_paren(tokens, i + 1) else {
+                i += 1;
+                continue;
+            };
+            let cols = subquery_columns(&tokens[i + 2..close], schema);
+            let mut j = close + 1;
+            if tokens.get(j).is_some_and(|t| t.eq_ignore_ascii_case("AS")) {
+                j += 1;
+            }
+            if let Some(alias) = tokens.get(j)
+                && is_word(alias)
+                && !RESERVED_AFTER_TABLE.contains(&alias.to_uppercase().as_str())
+            {
+                out.insert(alias.to_lowercase(), cols);
+                i = j + 1;
+                continue;
+            }
+            i = close + 1;
+            continue;
+        }
+
+        if tokens.get(i + 1).is_some_and(|t| is_word(t)) {
+            let table = tokens[i + 1].clone();
+            let mut j = i + 2;
+            if tokens.get(j).is_some_and(|t| t.eq_ignore_ascii_case("AS")) {
+                j += 1;
+            }
+            if let Some(alias) = tokens.get(j)
+                && is_word(alias)
+                && !RESERVED_AFTER_TABLE.contains(&alias.to_uppercase().as_str())
+            {
+                if let Some(cols) = schema_columns(schema, &table) {
+                    out.insert(alias.to_lowercase(), cols.clone());
+                }
+                i = j + 1;
+                continue;
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn context_kind(before: &str) -> Ctx {
+    let trimmed = before.trim_end();
+    if trimmed.ends_with(',') || trimmed.ends_with('(') {
+        return Ctx::Columns;
+    }
+    let last = trimmed
+        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+        .find(|w| !w.is_empty())
+        .unwrap_or("")
+        .to_uppercase();
+    match last.as_str() {
+        "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE" => Ctx::Tables,
+        "SELECT" | "WHERE" | "AND" | "OR" | "ON" | "BY" | "SET" | "HAVING" | "DISTINCT" => {
+            Ctx::Columns
+        }
+        _ => Ctx::Any,
+    }
+}
+
 // --- Rejilla de resultados ---
 
 /// Ancho por columna = máx(cabecera, celdas), acotado a [3, 24].
@@ -645,4 +1183,66 @@ fn dim_block<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
         .block(block)
         .style(Style::default().fg(theme::DIM))
         .wrap(Wrap { trim: true })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_alias_columns, tokenize};
+    use std::collections::HashMap;
+
+    fn schema() -> HashMap<String, Vec<String>> {
+        HashMap::from([("documents".to_string(), vec!["id".to_string(), "name".to_string()])])
+    }
+
+    fn aliases(sql: &str) -> HashMap<String, Vec<String>> {
+        extract_alias_columns(&tokenize(sql), &schema())
+    }
+
+    #[test]
+    fn alias_con_as() {
+        let a = aliases("select * from documents as d where d.x = 1");
+        assert_eq!(a.get("d"), Some(&vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn alias_sin_as() {
+        let a = aliases("select * from documents d where d.x = 1");
+        assert_eq!(a.get("d"), Some(&vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn coma_no_genera_alias_falso() {
+        let a = aliases("select a, b from documents");
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn tabla_sin_alias() {
+        let a = aliases("select * from documents where x = 1");
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn join_con_alias() {
+        let a = aliases("from a inner join documents d on a.id = d.a_id");
+        assert_eq!(a.get("d"), Some(&vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn subquery_select_star() {
+        let a = aliases("select * from (select * from documents) x where x.");
+        assert_eq!(a.get("x"), Some(&vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn subquery_lista_explicita_con_alias() {
+        let a = aliases("select * from (select id, name as n from documents) x");
+        assert_eq!(a.get("x"), Some(&vec!["id".to_string(), "n".to_string()]));
+    }
+
+    #[test]
+    fn subquery_table_star() {
+        let a = aliases("select * from (select d.* from documents d) x");
+        assert_eq!(a.get("x"), Some(&vec!["id".to_string(), "name".to_string()]));
+    }
 }

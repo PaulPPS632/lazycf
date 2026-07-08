@@ -102,8 +102,8 @@ impl TextInput {
         self.cursor = self.char_count();
     }
 
-    /// Línea y columna actuales del cursor (para multilínea).
-    fn line_col(&self) -> (usize, usize) {
+    /// Línea y columna actuales del cursor (para multilínea y popups anclados).
+    pub fn line_col(&self) -> (usize, usize) {
         let mut line = 0;
         let mut col = 0;
         for (i, ch) in self.value.chars().enumerate() {
@@ -152,6 +152,48 @@ impl TextInput {
         let nlines = self.value.split('\n').count();
         if line + 1 < nlines {
             self.set_line_col(line + 1, col);
+        }
+    }
+
+    /// Palabra ([A-Za-z0-9_]) inmediatamente antes del cursor.
+    pub fn word_before_cursor(&self) -> String {
+        let chars: Vec<char> = self.value.chars().collect();
+        let end = self.cursor.min(chars.len());
+        let mut start = end;
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        chars[start..end].iter().collect()
+    }
+
+    /// Si justo antes de la palabra actual hay un '.', devuelve el identificador
+    /// que lo precede (el alias/tabla). P. ej. con cursor tras "d." o "d.na" →
+    /// `Some("d")` (para autocompletar columnas de una tabla con alias).
+    pub fn alias_before_cursor(&self) -> Option<String> {
+        let chars: Vec<char> = self.value.chars().collect();
+        let end = self.cursor.min(chars.len());
+        let mut i = end;
+        while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+            i -= 1;
+        }
+        if i == 0 || chars[i - 1] != '.' {
+            return None;
+        }
+        let dot = i - 1;
+        let mut start = dot;
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        (start != dot).then(|| chars[start..dot].iter().collect())
+    }
+
+    /// Reemplaza la palabra antes del cursor por `replacement` (autocompletado).
+    pub fn replace_word_before_cursor(&mut self, replacement: &str) {
+        for _ in 0..self.word_before_cursor().chars().count() {
+            self.backspace();
+        }
+        for c in replacement.chars() {
+            self.insert(c);
         }
     }
 
@@ -216,4 +258,30 @@ impl TextInput {
 /// Cursor de bloque (vídeo inverso).
 fn cursor_style() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextInput;
+
+    #[test]
+    fn alias_tras_punto_al_final() {
+        assert_eq!(
+            TextInput::new("select * from documents d where d.").alias_before_cursor(),
+            Some("d".to_string())
+        );
+    }
+
+    #[test]
+    fn alias_tras_punto_con_palabra_parcial() {
+        assert_eq!(
+            TextInput::new("where d.na").alias_before_cursor(),
+            Some("d".to_string())
+        );
+    }
+
+    #[test]
+    fn sin_punto_no_hay_alias() {
+        assert_eq!(TextInput::new("select * from documents").alias_before_cursor(), None);
+    }
 }

@@ -191,8 +191,13 @@ pub enum Action {
     // --- D1 (Fase 5) ---
     /// Bases de datos D1 cargadas.
     D1DatabasesLoaded(Vec<D1Database>),
-    /// Tablas de una base concreta cargadas.
-    D1TablesLoaded { db_id: String, tables: Vec<String> },
+    /// Tablas de una base concreta cargadas, con su esquema (tabla → columnas)
+    /// para el autocompletado del editor SQL.
+    D1TablesLoaded {
+        db_id: String,
+        tables: Vec<String>,
+        schema: std::collections::HashMap<String, Vec<String>>,
+    },
     /// Error al listar tablas (se muestra en el panel de tablas).
     D1TablesError(String),
     /// Resultado de una consulta (título + tabla o error).
