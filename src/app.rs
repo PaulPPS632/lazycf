@@ -17,8 +17,8 @@ use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
     AccountPicker, AccountRow, BindingEdit, BucketDomains, ChooseDomain, ChoosePurpose, Confirm,
-    CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection, HttpTest, ImageView, Message,
-    NewBucket, NewFolder, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm,
+    CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection, HttpTest, ImageView, LogDetail,
+    Message, NewBucket, NewFolder, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm,
     RenameForm, RouteField, RouteForm, SearchInput, TokenEntry, UploadForm, ZoneRef,
 };
 use crate::components::r2::{BucketInfo, Entry, R2View};
@@ -46,6 +46,8 @@ enum Focus {
     Tunnels,
     TunnelRoutes,
     Workers,
+    /// Columna 3 de Workers (detalle con pestañas).
+    WorkersDetail,
     D1Dbs,
     D1Tables,
     D1Editor,
@@ -55,6 +57,8 @@ enum Focus {
     R2Objects,
     /// Barra de filtro del navegador de objetos (solo se entra con `/`).
     R2Filter,
+    /// Barra de filtro de los logs de Workers (solo se entra con `/`).
+    WorkersLogFilter,
 }
 
 /// Un token verificado, con su cliente HTTP y sus cuentas visibles.
@@ -117,6 +121,7 @@ pub struct App {
     rect_tunnels: Option<Rect>,
     rect_tunnel_routes: Option<Rect>,
     rect_workers: Option<Rect>,
+    rect_workers_detail: Option<Rect>,
     rect_d1_dbs: Option<Rect>,
     rect_d1_tables: Option<Rect>,
     rect_d1_editor: Option<Rect>,
@@ -165,6 +170,7 @@ impl App {
             rect_tunnels: None,
             rect_tunnel_routes: None,
             rect_workers: None,
+            rect_workers_detail: None,
             rect_d1_dbs: None,
             rect_d1_tables: None,
             rect_d1_editor: None,
@@ -259,10 +265,10 @@ impl App {
             return;
         }
 
-        // La barra de filtro R2 captura todo el texto (incluidas q/?/A).
-        // Tab/Shift-Tab siguen el ciclo normal de paneles; el filtro se
-        // mantiene aplicado al salir.
-        if self.focus == Focus::R2Filter {
+        // Las barras de filtro (R2 objetos / logs Workers) capturan todo el
+        // texto (incluidas q/?/A). Tab/Shift-Tab siguen el ciclo de paneles;
+        // el filtro se mantiene aplicado al salir.
+        if matches!(self.focus, Focus::R2Filter | Focus::WorkersLogFilter) {
             match key.code {
                 KeyCode::Tab => self.dispatch(Action::CycleFocus { back: false }),
                 KeyCode::BackTab => self.dispatch(Action::CycleFocus { back: true }),
@@ -378,6 +384,30 @@ impl App {
                 && let Some(script) = self.workers.selected_name()
             {
                 self.load_metrics(script);
+            }
+            return;
+        }
+        if let Some(r) = self.rect_workers_detail
+            && r.contains(pos)
+        {
+            self.focus = Focus::WorkersDetail;
+            // Selecciona la fila clicada en las pestañas con lista. Offsets:
+            // borde(1)+tabs(1)+separador(1) = contenido en r.y+3; en Logs se
+            // suman cabecera(1)+filtro(1) = lista en r.y+5.
+            match self.workers.active_tab {
+                1 => {
+                    let top = r.y + 3;
+                    if pos.y >= top {
+                        self.workers.deploy_at((pos.y - top) as usize);
+                    }
+                }
+                3 => {
+                    let top = r.y + 5;
+                    if pos.y >= top {
+                        self.workers.log_at((pos.y - top) as usize);
+                    }
+                }
+                _ => {}
             }
             return;
         }
@@ -501,6 +531,13 @@ impl App {
             self.change_worker(delta);
             return;
         }
+        if let Some(r) = self.rect_workers_detail
+            && r.contains(pos)
+        {
+            self.focus = Focus::WorkersDetail;
+            self.workers_detail_nav(delta);
+            return;
+        }
         if let Some(r) = self.rect_d1_dbs
             && r.contains(pos)
         {
@@ -601,10 +638,10 @@ impl App {
                 }
                 _ => {}
             },
+            // Columna 2: lista de workers. ↑↓ cambia de worker; Tab → detalle.
             Focus::Workers => match key.code {
-                // En la pestaña Variables, ↑↓ navegan los bindings; si no, los workers.
-                KeyCode::Up | KeyCode::Char('k') => self.workers_up_down(-1),
-                KeyCode::Down | KeyCode::Char('j') => self.workers_up_down(1),
+                KeyCode::Up | KeyCode::Char('k') => self.change_worker(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.change_worker(1),
                 KeyCode::Left => {
                     self.workers.cycle_tab(-1);
                     self.load_active_tab();
@@ -613,16 +650,57 @@ impl App {
                     self.workers.cycle_tab(1);
                     self.load_active_tab();
                 }
-                KeyCode::Char(c @ '1'..='4') => {
+                KeyCode::Char(c @ '1'..='5') => {
                     self.workers.set_tab(c as usize - '1' as usize);
                     self.load_active_tab();
                 }
+                KeyCode::Char('l') => self.toggle_tail(),
+                KeyCode::Char('t') => self.open_http_test(),
+                KeyCode::Char('r') => self.load_workers(),
+                _ => {}
+            },
+            // Columna 3: detalle. ↑↓ navega el contenido de la pestaña activa.
+            Focus::WorkersDetail => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.workers_detail_nav(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.workers_detail_nav(1),
+                KeyCode::Left => {
+                    self.workers.cycle_tab(-1);
+                    self.load_active_tab();
+                }
+                KeyCode::Right => {
+                    self.workers.cycle_tab(1);
+                    self.load_active_tab();
+                }
+                KeyCode::Char(c @ '1'..='5') => {
+                    self.workers.set_tab(c as usize - '1' as usize);
+                    self.load_active_tab();
+                }
+                KeyCode::Enter => self.workers_enter(),
+                KeyCode::End if self.workers.active_tab == 3 => self.workers.log_follow_end(),
+                KeyCode::Char('/') if self.workers.active_tab == 3 => {
+                    self.focus = Focus::WorkersLogFilter;
+                }
+                KeyCode::Char('E') if self.workers.active_tab == 3 => {
+                    self.workers.toggle_log_errors_only();
+                }
+                KeyCode::Char('y') if self.workers.active_tab == 3 => self.copy_log_event(),
                 KeyCode::Char('e') if self.workers.active_tab == 2 => self.open_edit_binding(),
                 KeyCode::Char('a') if self.workers.active_tab == 2 => self.open_add_secret(),
                 KeyCode::Char('l') => self.toggle_tail(),
                 KeyCode::Char('t') => self.open_http_test(),
                 KeyCode::Char('r') => self.load_workers(),
                 _ => {}
+            },
+            Focus::WorkersLogFilter => match key.code {
+                KeyCode::Enter => self.focus = Focus::WorkersDetail, // fija el filtro
+                KeyCode::Esc => {
+                    self.workers.clear_log_filter();
+                    self.focus = Focus::WorkersDetail;
+                }
+                code => {
+                    edit_input(self.workers.log_filter_mut(), code);
+                    self.workers.apply_log_filter(); // live
+                }
             },
             Focus::D1Dbs => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.change_db(-1),
@@ -821,6 +899,7 @@ impl App {
             NewFolder,
             BucketDomains,
             DomainAdd,
+            LogDetail,
             Message,
         }
         let kind = match self.popup.as_ref()? {
@@ -844,6 +923,7 @@ impl App {
             Popup::NewFolder(_) => Kind::NewFolder,
             Popup::BucketDomains(_) => Kind::BucketDomains,
             Popup::DomainAdd(_) => Kind::DomainAdd,
+            Popup::LogDetail(_) => Kind::LogDetail,
             // El visor de imagen se cierra con cualquier tecla, como Help.
             Popup::ImageView(_) => Kind::Help,
             Popup::Message(_) => Kind::Message,
@@ -1628,6 +1708,41 @@ impl App {
                 }
                 None
             }
+            Kind::LogDetail => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => self.popup = None,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if let Some(Popup::LogDetail(d)) = self.popup.as_mut() {
+                            d.scroll = d.scroll.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(Popup::LogDetail(d)) = self.popup.as_mut() {
+                            let max = d.lines.len().saturating_sub(1) as u16;
+                            d.scroll = (d.scroll + 1).min(max);
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        if let Some(Popup::LogDetail(d)) = self.popup.as_mut() {
+                            d.scroll = d.scroll.saturating_sub(10);
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if let Some(Popup::LogDetail(d)) = self.popup.as_mut() {
+                            let max = d.lines.len().saturating_sub(1) as u16;
+                            d.scroll = (d.scroll + 10).min(max);
+                        }
+                    }
+                    KeyCode::Char('y') => {
+                        if let Some(Popup::LogDetail(d)) = self.popup.as_ref() {
+                            crate::tui::osc52_copy(&d.raw);
+                            self.status = "Evento copiado al portapapeles".into();
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            }
             Kind::Help | Kind::Message => {
                 self.popup = None;
                 None
@@ -1825,6 +1940,14 @@ impl App {
                     Some(Popup::DomainAdd(f)) => f.set_zones(refs),
                     _ => {}
                 }
+                // Si la pestaña Rutas de Workers esperaba las zonas, reintenta.
+                if self.sidebar.module() == Module::Workers
+                    && self.workers.active_tab == 4
+                    && self.workers.routing.is_idle()
+                    && let Some(script) = self.workers.selected_name()
+                {
+                    self.load_routing(script);
+                }
             }
             Action::RecordsLoaded { zone_id, records } => {
                 if self.dns.selected_zone_id().as_deref() == Some(zone_id.as_str()) {
@@ -2005,19 +2128,21 @@ impl App {
             Action::TailStarted { script } => {
                 if self.workers.selected_name().as_deref() == Some(script.as_str()) {
                     self.status = "Tail: ● en vivo".into();
-                    self.workers.push_logs(vec!["· conectado".into()]);
+                    self.workers
+                        .push_event(crate::api::workers::TailEvent::info("· conectado"));
                 }
             }
-            Action::TailLines { script, lines } => {
+            Action::TailPush { script, event } => {
                 if self.workers.tailing
                     && self.workers.selected_name().as_deref() == Some(script.as_str())
                 {
-                    self.workers.push_logs(lines);
+                    self.workers.push_event(event);
                 }
             }
             Action::TailError { script, msg } => {
                 if self.workers.selected_name().as_deref() == Some(script.as_str()) {
-                    self.workers.push_logs(vec![format!("✗ {msg}")]);
+                    self.workers
+                        .push_event(crate::api::workers::TailEvent::error(format!("✗ {msg}")));
                     self.status = format!("Tail: {msg}");
                 }
             }
@@ -2025,9 +2150,26 @@ impl App {
                 self.tail_stop = None;
                 if self.workers.selected_name().as_deref() == Some(script.as_str()) {
                     self.workers.set_tailing(false);
-                    self.workers.push_logs(vec!["· tail finalizado".into()]);
+                    self.workers
+                        .push_event(crate::api::workers::TailEvent::info("· tail finalizado"));
                 }
             }
+            Action::RoutingLoaded { script, routing } => {
+                if self.workers.selected_name().as_deref() == Some(script.as_str()) {
+                    self.workers.set_routing(routing);
+                }
+            }
+            Action::RollbackDeployment { script, versions } => {
+                self.spawn_rollback(script, versions);
+            }
+            Action::DeploymentRolledBack { script, msg } => {
+                self.status = msg;
+                if self.workers.selected_name().as_deref() == Some(script.as_str()) {
+                    // Recarga: el deployment revertido pasa a ser el activo (índice 0).
+                    self.load_deployments(script);
+                }
+            }
+            Action::RollbackError(e) => self.status = format!("Rollback: {e}"),
 
             Action::SaveBinding {
                 script,
@@ -2930,13 +3072,87 @@ impl App {
         }
     }
 
-    /// ↑↓ en Workers: navega bindings en la pestaña Variables; si no, workers.
-    fn workers_up_down(&mut self, delta: i32) {
-        if self.workers.active_tab == 2 && self.workers.bindings_ready_nonempty() {
-            self.workers.select_binding(delta);
-        } else {
-            self.change_worker(delta);
+    /// ↑↓ en la columna 3: navega el contenido de la pestaña activa
+    /// (implementación / binding / log). Métricas y Rutas no navegan.
+    fn workers_detail_nav(&mut self, delta: i32) {
+        match self.workers.active_tab {
+            1 => {
+                self.workers.select_deploy(delta);
+            }
+            2 => {
+                self.workers.select_binding(delta);
+            }
+            3 => {
+                self.workers.log_scroll(delta);
+            }
+            _ => {}
         }
+    }
+
+    /// Enter en Workers: revertir (Implementaciones) o ver detalle (Logs).
+    fn workers_enter(&mut self) {
+        match self.workers.active_tab {
+            1 => self.confirm_rollback(),
+            3 => self.open_log_detail(),
+            _ => {}
+        }
+    }
+
+    /// Enter en la pestaña Logs: abre el popup de detalle del evento (si tiene).
+    fn open_log_detail(&mut self) {
+        let Some(ev) = self.workers.selected_log_event() else {
+            return;
+        };
+        if ev.detail.is_empty() {
+            return; // evento sintético (conectado/finalizado): nada que expandir
+        }
+        self.popup = Some(Popup::LogDetail(LogDetail {
+            title: ev.summary.clone(),
+            lines: ev.detail.clone(),
+            raw: ev.raw.clone(),
+            scroll: 0,
+        }));
+    }
+
+    /// `y` en la pestaña Logs: copia el JSON crudo del evento seleccionado.
+    fn copy_log_event(&mut self) {
+        match self.workers.selected_log_event() {
+            Some(ev) if !ev.raw.is_empty() => {
+                crate::tui::osc52_copy(&ev.raw);
+                self.status = "Evento copiado al portapapeles".into();
+            }
+            _ => self.status = "Nada que copiar".into(),
+        }
+    }
+
+    /// Enter en Implementaciones: revierte al deployment seleccionado (Confirm).
+    fn confirm_rollback(&mut self) {
+        let Some(script) = self.workers.selected_name() else {
+            return;
+        };
+        let Some(idx) = self.workers.selected_deploy_index() else {
+            return;
+        };
+        if idx == 0 {
+            self.status = "Ese despliegue ya es el activo".into();
+            return;
+        }
+        let Some(dep) = self.workers.selected_deploy() else {
+            return;
+        };
+        if dep.versions.is_empty() {
+            self.status = "El despliegue no tiene versiones para revertir".into();
+            return;
+        }
+        let versions = dep.versions.clone();
+        let fecha = crate::components::workers::short_date(&dep.created_on);
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Revertir despliegue".into(),
+            body: format!(
+                "¿Revertir al despliegue de {fecha}?\nSe volverá a desplegar esa(s) versión(es)."
+            ),
+            on_yes: Action::RollbackDeployment { script, versions },
+        }));
     }
 
     fn open_edit_binding(&mut self) {
@@ -2986,6 +3202,7 @@ impl App {
             0 if self.workers.metrics.is_idle() => self.load_metrics(script),
             1 if self.workers.deployments.is_idle() => self.load_deployments(script),
             2 if self.workers.bindings.is_idle() => self.load_bindings(script),
+            4 if self.workers.routing.is_idle() => self.load_routing(script),
             _ => {}
         }
     }
@@ -3077,6 +3294,60 @@ impl App {
         });
     }
 
+    /// Rutas de zona (fan-out) + custom domains del worker. Necesita las zonas
+    /// de la cuenta; si aún no están, las carga y reintenta desde `ZonesLoaded`.
+    fn load_routing(&mut self, script: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        if self.all_zones.is_empty() && !self.dns.loading_zones {
+            self.load_zones();
+        }
+        let zones: Vec<(String, String)> = self
+            .account_zone_refs()
+            .into_iter()
+            .map(|z| (z.id, z.name))
+            .collect();
+        self.workers.begin_routing(zones.len());
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let routing = client
+                .worker_routes_for(&account_id, &zones, &script)
+                .await
+                .ok()
+                .map(|(routes, domains)| crate::components::workers::RoutingInfo {
+                    routes: routes.into_iter().map(|(zn, r)| (r.pattern, zn)).collect(),
+                    domains: domains.into_iter().map(|d| d.hostname).collect(),
+                });
+            let _ = tx.send(Action::RoutingLoaded { script, routing });
+        });
+    }
+
+    fn spawn_rollback(&mut self, script: String, versions: Vec<crate::model::DeployVersion>) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Revirtiendo…".into();
+        tokio::spawn(async move {
+            let action = match client
+                .rollback_deployment(&account_id, &script, &versions)
+                .await
+            {
+                Ok(()) => Action::DeploymentRolledBack {
+                    script,
+                    msg: "Rollback aplicado".into(),
+                },
+                Err(e) => Action::RollbackError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
     fn spawn_probe(&mut self, url: String) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
@@ -3104,7 +3375,8 @@ impl App {
         self.workers.set_tab(3);
         self.workers.clear_logs();
         self.workers.set_tailing(true);
-        self.workers.push_logs(vec!["· conectando…".into()]);
+        self.workers
+            .push_event(crate::api::workers::TailEvent::info("· conectando…"));
         self.status = "Iniciando tail…".into();
 
         let tx = self.action_tx.clone();
@@ -3151,16 +3423,14 @@ impl App {
                         // El servidor puede emitir los eventos como frame de
                         // texto o binario (JSON en ambos casos).
                         Some(Ok(Message::Text(t))) => {
-                            let lines = crate::api::workers::parse_tail(t.as_str());
-                            if !lines.is_empty() {
-                                let _ = tx.send(Action::TailLines { script: script.clone(), lines });
+                            if let Some(event) = crate::api::workers::parse_tail(t.as_str()) {
+                                let _ = tx.send(Action::TailPush { script: script.clone(), event });
                             }
                         }
                         Some(Ok(Message::Binary(b))) => {
                             let raw = String::from_utf8_lossy(&b);
-                            let lines = crate::api::workers::parse_tail(&raw);
-                            if !lines.is_empty() {
-                                let _ = tx.send(Action::TailLines { script: script.clone(), lines });
+                            if let Some(event) = crate::api::workers::parse_tail(&raw) {
+                                let _ = tx.send(Action::TailPush { script: script.clone(), event });
                             }
                         }
                         Some(Ok(Message::Ping(p))) => {
@@ -4375,7 +4645,8 @@ impl App {
         static DNS_PANES: &[Focus] = &[Focus::Modules, Focus::Zones, Focus::Records];
         static TUNNEL_PANES: &[Focus] =
             &[Focus::Modules, Focus::Tunnels, Focus::TunnelRoutes];
-        static WORKER_PANES: &[Focus] = &[Focus::Modules, Focus::Workers];
+        static WORKER_PANES: &[Focus] =
+            &[Focus::Modules, Focus::Workers, Focus::WorkersDetail];
         static D1_PANES: &[Focus] = &[
             Focus::Modules,
             Focus::D1Dbs,
@@ -4473,13 +4744,26 @@ impl App {
                 ],
             ),
             Focus::Workers => HelpSection::new(
-                "Workers",
+                "Workers (lista)",
                 vec![
-                    ("1-4 / ←→", "pestaña (métricas/impl./vars/logs)"),
-                    ("↑ ↓ / k j", "navegar workers (o variables en pestaña Vars)"),
-                    ("e", "editar variable/secreto (pestaña Vars)"),
-                    ("a", "añadir secreto (pestaña Vars)"),
+                    ("↑ ↓ / k j", "cambiar de worker"),
+                    ("Tab", "ir al detalle (columna 3)"),
+                    ("1-5 / ←→", "pestaña (métricas/impl./vars/logs/rutas)"),
+                    ("l", "live-tail de logs on/off"),
+                    ("t", "probar una ruta (GET)"),
+                    ("r", "recargar workers"),
+                ],
+            ),
+            Focus::WorkersDetail => HelpSection::new(
+                "Workers (detalle)",
+                vec![
+                    ("1-5 / ←→", "pestaña (métricas/impl./vars/logs/rutas)"),
+                    ("↑ ↓ / k j", "navegar (impl. · vars · logs según pestaña)"),
+                    ("Enter", "revertir despliegue (impl.) · ver detalle (logs)"),
+                    ("e / a", "editar / añadir secreto (pestaña Vars)"),
                     ("l", "live-tail de logs on/off (pestaña Logs)"),
+                    ("/ · E · y", "filtrar · solo errores · copiar evento (Logs)"),
+                    ("End", "seguir el final del tail (Logs)"),
                     ("t", "probar una ruta (GET)"),
                     ("r", "recargar workers"),
                 ],
@@ -4516,6 +4800,14 @@ impl App {
                     ("(texto)", "escribe una cláusula WHERE"),
                     ("Enter", "aplicar el filtro a la tabla"),
                     ("Esc", "ir a los resultados"),
+                ],
+            ),
+            Focus::WorkersLogFilter => HelpSection::new(
+                "Filtro de logs",
+                vec![
+                    ("(texto)", "filtrar por método/URL/mensaje"),
+                    ("Enter", "fijar el filtro"),
+                    ("Esc", "limpiar el filtro"),
                 ],
             ),
             Focus::D1Results => HelpSection::new(
@@ -4589,6 +4881,7 @@ impl App {
         self.rect_tunnels = None;
         self.rect_tunnel_routes = None;
         self.rect_workers = None;
+        self.rect_workers_detail = None;
         self.rect_d1_dbs = None;
         self.rect_d1_tables = None;
         self.rect_d1_editor = None;
@@ -4630,8 +4923,16 @@ impl App {
                     crate::components::workers::split(shell.main);
                 self.workers
                     .draw_list(frame, list_area, self.focus == Focus::Workers);
-                self.workers.draw_detail(frame, detail_area, false);
+                let detail_focused =
+                    matches!(self.focus, Focus::WorkersDetail | Focus::WorkersLogFilter);
+                self.workers.draw_detail(
+                    frame,
+                    detail_area,
+                    detail_focused,
+                    self.focus == Focus::WorkersLogFilter,
+                );
                 self.rect_workers = Some(list_area);
+                self.rect_workers_detail = Some(detail_area);
             }
             Module::D1 if main_active => {
                 let (dbs_area, tables_area, editor_area, result_area) =
@@ -4737,8 +5038,13 @@ impl App {
                     "↑↓ ruta · a añadir · e editar · d borrar · Tab → · ? ayuda".into()
                 }
                 Focus::Workers => {
-                    "↑↓ · 1-4 pestaña · e editar · a secreto · l logs · t probar · ?".into()
+                    "↑↓ worker · Tab → detalle · 1-5 pestaña · l logs · t probar · ?".into()
                 }
+                Focus::WorkersDetail => match self.workers.active_tab {
+                    1 => "↑↓ deploy · Enter revertir · 1-5 pestaña · l logs · t · r · ?".into(),
+                    3 => "↑↓ log · Enter detalle · / filtrar · E errores · y copiar · End sigue".into(),
+                    _ => "↑↓ contenido · 1-5 pestaña · e editar · a secreto · l · t · ?".into(),
+                },
                 Focus::D1Dbs => "↑↓ base · Tab → editor · r recargar · A · ? ayuda".into(),
                 Focus::D1Tables => "↑↓ tabla · Enter SELECT * · Tab → editor · r · ?".into(),
                 Focus::D1Editor => {
@@ -4766,6 +5072,9 @@ impl App {
                 }
                 Focus::R2Filter => {
                     "escribe para filtrar · Enter fijar · Esc limpiar · Tab panel".into()
+                }
+                Focus::WorkersLogFilter => {
+                    "escribe para filtrar logs · Enter fijar · Esc limpiar · Tab panel".into()
                 }
             }
         };

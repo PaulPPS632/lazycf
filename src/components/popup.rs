@@ -56,8 +56,19 @@ pub enum Popup {
     BucketDomains(BucketDomains),
     /// Conectar un dominio personalizado (subdominio + zona de la cuenta).
     DomainAdd(DomainAddForm),
+    /// Detalle scrollable de un evento del live-tail de Workers.
+    LogDetail(LogDetail),
     /// Mensaje informativo o de error.
     Message(Message),
+}
+
+/// Detalle de un evento de tail (request/cf/logs/excepciones), scrollable.
+pub struct LogDetail {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// JSON crudo del evento (para copiar con `y`).
+    pub raw: String,
+    pub scroll: u16,
 }
 
 /// Editor de variable (plain_text) o secreto (secret_text) de un Worker.
@@ -758,8 +769,28 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::NewFolder(f) => draw_new_folder(frame, area, f),
         Popup::BucketDomains(d) => draw_bucket_domains(frame, area, d),
         Popup::DomainAdd(f) => draw_domain_add(frame, area, f),
+        Popup::LogDetail(d) => draw_log_detail(frame, area, d),
         Popup::Message(msg) => draw_message(frame, area, msg),
     }
+}
+
+fn draw_log_detail(frame: &mut Frame, area: Rect, d: &LogDetail) {
+    let width = (area.width.saturating_mul(4) / 5).max(50);
+    let height = (area.height.saturating_mul(4) / 5).max(10);
+    let rect = layout::centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(format!(" {} ", d.title))
+        .title_bottom(" ↑↓/PgUp/PgDn desplazar · y copiar JSON · Esc cerrar ")
+        .border_style(theme::border(true))
+        .title_style(theme::title(true));
+    let lines: Vec<Line> = d
+        .lines
+        .iter()
+        .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme::FG))))
+        .collect();
+    let body = Paragraph::new(lines).block(block).scroll((d.scroll, 0));
+    frame.render_widget(body, rect);
 }
 
 fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {

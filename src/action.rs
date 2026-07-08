@@ -167,12 +167,31 @@ pub enum Action {
     StopTail,
     /// El WebSocket de tail se conectó.
     TailStarted { script: String },
-    /// Nuevas líneas de log recibidas por el tail.
-    TailLines { script: String, lines: Vec<String> },
+    /// Un evento de tail recibido por el WebSocket.
+    TailPush {
+        script: String,
+        event: crate::api::workers::TailEvent,
+    },
     /// Error en el tail (creación/WS).
     TailError { script: String, msg: String },
     /// El tail terminó (parado, cerrado o expirado).
     TailEnded { script: String },
+
+    // --- Workers: rutas / rollback ---
+    /// Rutas de zona + custom domains del worker (`None` = error).
+    RoutingLoaded {
+        script: String,
+        routing: Option<crate::components::workers::RoutingInfo>,
+    },
+    /// Revertir a un deployment previo (re-desplegar sus versiones).
+    RollbackDeployment {
+        script: String,
+        versions: Vec<crate::model::DeployVersion>,
+    },
+    /// Rollback OK: fija estado y recarga las implementaciones.
+    DeploymentRolledBack { script: String, msg: String },
+    /// Error al revertir.
+    RollbackError(String),
 
     // --- Workers: variables / secretos ---
     /// Guardar una variable (plain_text) o secreto (secret_text).

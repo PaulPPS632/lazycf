@@ -170,10 +170,20 @@ impl WorkerMetrics {
     }
 }
 
+/// Versión desplegada dentro de un deployment (para rollback multi-versión).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DeployVersion {
+    #[serde(default)]
+    pub version_id: String,
+    /// Porcentaje de tráfico (soporta despliegues graduales, p. ej. 10.0).
+    #[serde(default)]
+    pub percentage: f64,
+}
+
 /// Implementación (deployment) de un Worker.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Deployment {
-    #[allow(dead_code)] // id del deployment; para rollback en el futuro
+    #[allow(dead_code)] // id del deployment (informativo)
     pub id: String,
     #[serde(default)]
     pub created_on: String,
@@ -181,6 +191,31 @@ pub struct Deployment {
     pub author_email: String,
     #[serde(default)]
     pub source: String,
+    /// Versiones que sirve este deployment (para revertir preservando pesos).
+    #[serde(default)]
+    pub versions: Vec<DeployVersion>,
+}
+
+/// Ruta de zona que apunta a un Worker (`GET /zones/{id}/workers/routes`).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WorkerRoute {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub id: String,
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub script: Option<String>,
+}
+
+/// Custom domain de Workers (`GET /accounts/{id}/workers/domains`).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WorkerDomain {
+    #[serde(default)]
+    pub hostname: String,
+    /// Nombre del script asociado.
+    #[serde(default)]
+    pub service: String,
 }
 
 /// Binding de un Worker (variable, secreto, KV, D1, R2, cola, AI…).
