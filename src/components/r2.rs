@@ -3,6 +3,8 @@
 //!   col.3 = navegador de objetos (carpetas por `delimiter=/`), con subida,
 //!           descarga, borrado, URLs prefirmadas y preview de imágenes.
 
+use std::collections::HashSet;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -10,6 +12,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::api::r2::ObjectList;
+use crate::components::input::TextInput;
 use crate::components::workers::Loadable;
 use crate::model::{CustomDomain, PublicDomain, R2Bucket, R2Object, R2Usage};
 use crate::ui::theme;
@@ -35,6 +38,26 @@ pub enum Entry {
     File(R2Object),
 }
 
+/// Modo del navegador: browse normal o resultados de búsqueda profunda.
+#[derive(Debug, Default)]
+pub enum BrowseMode {
+    #[default]
+    Normal,
+    Search(SearchState),
+}
+
+/// Estado de una búsqueda profunda (todo el bucket, paginada).
+#[derive(Debug)]
+pub struct SearchState {
+    pub term: String,
+    /// `false` mientras quedan páginas por recorrer.
+    pub done: bool,
+    pub pages: usize,
+    pub hits: usize,
+    /// Se alcanzó el tope de páginas (resultados parciales).
+    pub capped: bool,
+}
+
 #[derive(Default)]
 pub struct R2View {
     buckets: Vec<R2Bucket>,
@@ -53,6 +76,18 @@ pub struct R2View {
     pub loading_objects: bool,
     objects_error: Option<String>,
     truncated: bool,
+    /// Cursor de la página siguiente del listado actual (paginación).
+    next_cursor: Option<String>,
+    /// Filtro de la carpeta actual (tecla `/`).
+    filter: TextInput,
+    /// Índices de `entries` que pasan el filtro (identidad si está vacío).
+    /// La selección (`obj_state`) siempre indexa sobre esta lista.
+    visible: Vec<usize>,
+    /// Claves marcadas con Espacio (solo archivos) para el borrado masivo.
+    marks: HashSet<String>,
+    mode: BrowseMode,
+    /// Generación de búsqueda: descarta respuestas de búsquedas obsoletas.
+    search_gen: u64,
 }
 
 impl R2View {
@@ -126,6 +161,12 @@ impl R2View {
         self.loading_objects = false;
         self.objects_error = None;
         self.truncated = false;
+        self.next_cursor = None;
+        self.filter.set(String::new());
+        self.visible.clear();
+        self.marks.clear();
+        self.mode = BrowseMode::Normal;
+        self.search_gen += 1; // descarta búsquedas en vuelo
     }
 
     pub fn begin_objects(&mut self) {
@@ -133,21 +174,77 @@ impl R2View {
         self.objects_error = None;
     }
 
-    pub fn set_objects(&mut self, prefix: &str, list: ObjectList) {
+    pub fn set_objects(&mut self, prefix: &str, mut list: ObjectList) {
         if prefix != self.prefix {
             return; // respuesta de una navegación anterior
+        }
+        if matches!(self.mode, BrowseMode::Search(_)) {
+            return; // no pisar resultados de búsqueda con un listado tardío
         }
         self.loading_objects = false;
         self.objects_error = None;
         self.truncated = list.truncated;
+        self.next_cursor = list.cursor.take();
+        self.marks.clear();
+        // El marcador de la propia carpeta (objeto `prefijo/`) no se lista.
+        list.files.retain(|o| o.key != prefix);
         self.entries.clear();
         if !self.prefix.is_empty() {
             self.entries.push(Entry::Up);
         }
         self.entries.extend(list.folders.into_iter().map(Entry::Folder));
         self.entries.extend(list.files.into_iter().map(Entry::File));
+        self.recompute_visible();
         self.obj_state
-            .select((!self.entries.is_empty()).then_some(0));
+            .select((!self.visible.is_empty()).then_some(0));
+    }
+
+    /// Añade la página siguiente al listado actual (paginación por cursor).
+    pub fn append_objects(&mut self, prefix: &str, mut list: ObjectList) {
+        if prefix != self.prefix || matches!(self.mode, BrowseMode::Search(_)) {
+            return;
+        }
+        self.loading_objects = false;
+        self.truncated = list.truncated;
+        self.next_cursor = list.cursor.take();
+        // Una carpeta `delimited` puede repetirse entre páginas (prefijo que
+        // cruza el corte) y conviene no duplicar claves.
+        let have_folders: HashSet<&str> = self
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Folder(p) => Some(p.as_str()),
+                _ => None,
+            })
+            .collect();
+        let new_folders: Vec<String> = list
+            .folders
+            .into_iter()
+            .filter(|f| !have_folders.contains(f.as_str()))
+            .collect();
+        let have_keys: HashSet<&str> = self
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::File(o) => Some(o.key.as_str()),
+                _ => None,
+            })
+            .collect();
+        list.files
+            .retain(|o| o.key != prefix && !have_keys.contains(o.key.as_str()));
+        drop(have_folders);
+        drop(have_keys);
+        // Carpetas nuevas al final del bloque de carpetas (agrupación visual).
+        let at = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::Up | Entry::Folder(_)))
+            .map_or(0, |i| i + 1);
+        for (k, f) in new_folders.into_iter().enumerate() {
+            self.entries.insert(at + k, Entry::Folder(f));
+        }
+        self.entries.extend(list.files.into_iter().map(Entry::File));
+        self.recompute_visible();
     }
 
     pub fn set_objects_error(&mut self, msg: String) {
@@ -155,16 +252,35 @@ impl R2View {
         self.objects_error = Some(msg);
     }
 
+    /// Limpia solo el flag de carga (fallo al paginar: el listado se conserva).
+    /// En modo búsqueda no toca nada: ese flag lo gestiona la propia búsqueda.
+    pub fn end_loading(&mut self) {
+        if !self.is_searching() {
+            self.loading_objects = false;
+        }
+    }
+
     pub fn selected_entry(&self) -> Option<&Entry> {
-        self.obj_state.selected().and_then(|i| self.entries.get(i))
+        self.obj_state
+            .selected()
+            .and_then(|i| self.visible.get(i))
+            .and_then(|&r| self.entries.get(r))
     }
 
     /// `true` si ya hay un archivo listado con esa clave exacta (evita
-    /// sobrescribir en silencio al renombrar).
+    /// sobrescribir en silencio al renombrar). Escanea TODO el listado,
+    /// no solo lo visible tras el filtro.
     pub fn key_exists(&self, key: &str) -> bool {
         self.entries
             .iter()
             .any(|e| matches!(e, Entry::File(o) if o.key == key))
+    }
+
+    /// `true` si ya existe una carpeta con ese prefijo completo.
+    pub fn folder_exists(&self, full: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|e| matches!(e, Entry::Folder(p) if p == full))
     }
 
     /// Archivo seleccionado (si la fila actual es un archivo).
@@ -176,11 +292,199 @@ impl R2View {
     }
 
     pub fn select_entry(&mut self, delta: i32) -> bool {
-        select_in(&mut self.obj_state, self.entries.len(), delta)
+        select_in(&mut self.obj_state, self.visible.len(), delta)
     }
 
     pub fn entry_at(&mut self, rel: usize) -> bool {
-        at_row(&mut self.obj_state, self.entries.len(), rel)
+        at_row(&mut self.obj_state, self.visible.len(), rel)
+    }
+
+    // --- Filtro de la carpeta actual ---
+
+    /// Recalcula `visible` aplicando el filtro sobre el nombre mostrado
+    /// (clave completa en modo búsqueda). Reencaja la selección si sobra.
+    fn recompute_visible(&mut self) {
+        let needle = self.filter.value().trim().to_lowercase();
+        let searching = matches!(self.mode, BrowseMode::Search(_));
+        self.visible = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                needle.is_empty()
+                    || match e {
+                        Entry::Up => true,
+                        Entry::Folder(p) => folder_name(p).to_lowercase().contains(&needle),
+                        Entry::File(o) if searching => o.key.to_lowercase().contains(&needle),
+                        Entry::File(o) => o.filename().to_lowercase().contains(&needle),
+                    }
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match self.obj_state.selected() {
+            Some(s) if s < self.visible.len() => {}
+            _ => self
+                .obj_state
+                .select((!self.visible.is_empty()).then_some(0)),
+        }
+    }
+
+    /// Aplica el filtro tras cada tecla (live) y selecciona la primera fila.
+    pub fn apply_filter(&mut self) {
+        self.recompute_visible();
+        self.obj_state
+            .select((!self.visible.is_empty()).then_some(0));
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter.set(String::new());
+        self.apply_filter();
+    }
+
+    pub fn filter_mut(&mut self) -> &mut TextInput {
+        &mut self.filter
+    }
+
+    pub fn filter_is_empty(&self) -> bool {
+        self.filter.value().trim().is_empty()
+    }
+
+    // --- Paginación ---
+
+    /// La selección está en la última fila visible.
+    pub fn at_last_visible(&self) -> bool {
+        !self.visible.is_empty() && self.obj_state.selected() == Some(self.visible.len() - 1)
+    }
+
+    /// Hay página siguiente que cargar (solo en browse normal).
+    pub fn has_more(&self) -> bool {
+        self.next_cursor.is_some() && matches!(self.mode, BrowseMode::Normal)
+    }
+
+    pub fn next_cursor_cloned(&self) -> Option<String> {
+        self.next_cursor.clone()
+    }
+
+    // --- Marcas (multi-selección) ---
+
+    /// Marca/desmarca el archivo seleccionado. `false` si la fila no es archivo.
+    pub fn toggle_mark(&mut self) -> bool {
+        let Some(Entry::File(o)) = self.selected_entry() else {
+            return false;
+        };
+        let key = o.key.clone();
+        if !self.marks.remove(&key) {
+            self.marks.insert(key);
+        }
+        true
+    }
+
+    pub fn marks_len(&self) -> usize {
+        self.marks.len()
+    }
+
+    /// Claves marcadas, ordenadas (confirmación y borrado deterministas).
+    pub fn marked_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.marks.iter().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marks.clear();
+    }
+
+    // --- Búsqueda profunda ---
+
+    pub fn is_searching(&self) -> bool {
+        matches!(self.mode, BrowseMode::Search(_))
+    }
+
+    /// Término de la búsqueda activa (para relanzar con `r`).
+    pub fn search_term(&self) -> Option<&str> {
+        match &self.mode {
+            BrowseMode::Search(st) => Some(st.term.as_str()),
+            BrowseMode::Normal => None,
+        }
+    }
+
+    /// Entra en modo búsqueda y devuelve la generación para el guard async.
+    pub fn begin_search(&mut self, term: String) -> u64 {
+        self.search_gen += 1;
+        self.mode = BrowseMode::Search(SearchState {
+            term,
+            done: false,
+            pages: 0,
+            hits: 0,
+            capped: false,
+        });
+        self.entries.clear();
+        self.visible.clear();
+        self.marks.clear();
+        self.filter.set(String::new());
+        self.obj_state.select(None);
+        self.next_cursor = None;
+        self.loading_objects = true;
+        self.objects_error = None;
+        self.search_gen
+    }
+
+    /// Progreso de una búsqueda en curso. `false` si la respuesta es obsoleta.
+    pub fn set_search_progress(&mut self, generation: u64, pages: usize, hits: usize) -> bool {
+        if generation != self.search_gen {
+            return false;
+        }
+        let BrowseMode::Search(st) = &mut self.mode else {
+            return false;
+        };
+        st.pages = pages;
+        st.hits = hits;
+        true
+    }
+
+    /// Resultado final de la búsqueda. `false` si la respuesta es obsoleta.
+    pub fn set_search_results(
+        &mut self,
+        generation: u64,
+        files: Vec<R2Object>,
+        pages: usize,
+        capped: bool,
+    ) -> bool {
+        if generation != self.search_gen {
+            return false;
+        }
+        let BrowseMode::Search(st) = &mut self.mode else {
+            return false;
+        };
+        st.done = true;
+        st.pages = pages;
+        st.capped = capped;
+        self.loading_objects = false;
+        self.entries = files
+            .into_iter()
+            .filter(|o| !o.key.ends_with('/')) // marcadores de carpeta fuera
+            .map(Entry::File)
+            .collect();
+        if let BrowseMode::Search(st) = &mut self.mode {
+            st.hits = self.entries.len();
+        }
+        self.recompute_visible();
+        self.obj_state
+            .select((!self.visible.is_empty()).then_some(0));
+        true
+    }
+
+    /// Sale del modo búsqueda; el caller recarga el browse (prefijo intacto).
+    pub fn exit_search(&mut self) {
+        self.search_gen += 1; // descarta tareas en vuelo
+        self.mode = BrowseMode::Normal;
+        self.entries.clear();
+        self.visible.clear();
+        self.marks.clear();
+        self.filter.set(String::new());
+        self.obj_state.select(None);
+        self.next_cursor = None;
+        self.loading_objects = false;
     }
 
     /// Prefijo padre del actual (`empresas/1/` → `empresas/`).
@@ -245,10 +549,10 @@ impl R2View {
 
     pub fn draw_objects(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let bucket = self.selected_name().unwrap_or_default();
-        let title = if bucket.is_empty() {
-            " Objetos ".to_string()
-        } else {
-            format!(" 📂 {bucket}/{} ", self.prefix)
+        let title = match &self.mode {
+            _ if bucket.is_empty() => " Objetos ".to_string(),
+            BrowseMode::Search(st) => format!(" 🔎 {bucket} · «{}» ", st.term),
+            BrowseMode::Normal => format!(" 📂 {bucket}/{} ", self.prefix),
         };
         let block = Block::bordered()
             .title(title)
@@ -262,7 +566,13 @@ impl R2View {
             return;
         }
         if self.loading_objects && self.entries.is_empty() {
-            frame.render_widget(dim("Cargando objetos…"), inner);
+            let text = match &self.mode {
+                BrowseMode::Search(st) => {
+                    format!("Buscando… página {} · {} coincidencias", st.pages, st.hits)
+                }
+                BrowseMode::Normal => "Cargando objetos…".to_string(),
+            };
+            frame.render_widget(dim(&text), inner);
             return;
         }
         if let Some(e) = &self.objects_error {
@@ -274,8 +584,15 @@ impl R2View {
             );
             return;
         }
-        if self.entries.is_empty() {
-            frame.render_widget(dim("(vacío) · u subir un archivo"), inner);
+        if self.visible.is_empty() {
+            let text = if !self.filter_is_empty() {
+                format!("(sin coincidencias para «{}») · Esc limpia el filtro", self.filter.value().trim())
+            } else if self.is_searching() {
+                "(sin resultados) · Esc volver".to_string()
+            } else {
+                "(vacío) · u subir un archivo".to_string()
+            };
+            frame.render_widget(dim(&text), inner);
             return;
         }
 
@@ -285,42 +602,98 @@ impl R2View {
             .split(inner);
 
         let width = rows[0].width as usize;
-        let items: Vec<ListItem> = self.entries.iter().map(|e| entry_item(e, width)).collect();
+        let full_key = self.is_searching();
+        let items: Vec<ListItem> = self
+            .visible
+            .iter()
+            .filter_map(|&i| self.entries.get(i))
+            .map(|e| {
+                let marked = matches!(e, Entry::File(o) if self.marks.contains(&o.key));
+                entry_item(e, width, marked, full_key)
+            })
+            .collect();
         let list = List::new(items)
             .highlight_style(theme::selection())
             .highlight_symbol("▶ ");
         frame.render_stateful_widget(list, rows[0], &mut self.obj_state);
 
-        let mut hint = String::from("Enter abrir · u subir · d descargar · p URL · x borrar · v ver");
-        if self.truncated {
-            hint = format!("(truncado: primeros 500) · {hint}");
-        }
-        if self.loading_objects {
-            hint = format!("cargando… · {hint}");
-        }
+        let hint = match &self.mode {
+            BrowseMode::Search(st) => {
+                let mut h = format!("{} resultados · Enter ir a carpeta · Esc volver", st.hits);
+                if !st.done {
+                    h = format!("buscando… página {} · {h}", st.pages);
+                }
+                if st.capped {
+                    h.push_str(" · (tope 10k alcanzado)");
+                }
+                h
+            }
+            BrowseMode::Normal => {
+                let mut h =
+                    String::from("Enter abrir · u subir · d descargar · p URL · x borrar · v ver");
+                if self.next_cursor.is_some() {
+                    h = format!("(500+ · ↓ carga más) · {h}");
+                } else if self.truncated {
+                    h = format!("(truncado: primeros 500) · {h}");
+                }
+                if !self.marks.is_empty() {
+                    h = format!("{} marcados · {h}", self.marks.len());
+                }
+                if self.loading_objects {
+                    h = format!("cargando… · {h}");
+                }
+                h
+            }
+        };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(theme::DIM)))),
             rows[1],
         );
     }
+
+    /// Barra de filtro bajo el panel de objetos (tecla `/`).
+    pub fn draw_filter(&self, frame: &mut Frame, area: Rect, focused: bool) {
+        let block = Block::bordered()
+            .title(" / Filtro ")
+            .border_style(theme::border(focused))
+            .title_style(theme::title(focused));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if self.filter.is_empty() && !focused {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "pulsa / y escribe para filtrar por nombre",
+                    Style::default().fg(theme::DIM),
+                )),
+                inner,
+            );
+        } else {
+            frame.render_widget(Paragraph::new(Line::from(self.filter.spans(focused))), inner);
+        }
+    }
 }
 
 /// Fila del navegador: icono + nombre (izq) · tamaño y fecha (der).
-fn entry_item(entry: &Entry, width: usize) -> ListItem<'static> {
+/// `marked` = seleccionada con Espacio; `full_key` = modo búsqueda (clave completa).
+fn entry_item(entry: &Entry, width: usize, marked: bool, full_key: bool) -> ListItem<'static> {
     match entry {
         Entry::Up => ListItem::new(Line::from(Span::styled(
             "⬆ ..",
             Style::default().fg(theme::DIM),
         ))),
         Entry::Folder(prefix) => {
-            let name = prefix.trim_end_matches('/').rsplit('/').next().unwrap_or(prefix);
+            let name = folder_name(prefix);
             ListItem::new(Line::from(vec![
                 Span::styled("📁 ", Style::default().fg(theme::ACCENT)),
                 Span::styled(format!("{name}/"), Style::default().fg(theme::FG)),
             ]))
         }
         Entry::File(o) => {
-            let name = o.filename().to_string();
+            let name = if full_key {
+                o.key.clone()
+            } else {
+                o.filename().to_string()
+            };
             let meta = format!("{:>10}  {}", human_size(o.size), short_date(&o.last_modified));
             // Nombre a la izquierda, meta a la derecha (recortando el nombre).
             let avail = width.saturating_sub(meta.len() + 5).max(8);
@@ -330,14 +703,29 @@ fn entry_item(entry: &Entry, width: usize) -> ListItem<'static> {
             } else {
                 format!("{name:<avail$}")
             };
-            let icon = if o.is_image() { "🖼 " } else { "· " };
+            let (icon, icon_color) = if marked {
+                ("✓ ", theme::ACCENT)
+            } else if o.is_image() {
+                ("🖼 ", theme::DIM)
+            } else {
+                ("· ", theme::DIM)
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(icon, Style::default().fg(theme::DIM)),
+                Span::styled(icon, Style::default().fg(icon_color)),
                 Span::styled(shown, Style::default().fg(theme::FG)),
                 Span::styled(format!("  {meta}"), Style::default().fg(theme::DIM)),
             ]))
         }
     }
+}
+
+/// Nombre visible de una carpeta a partir de su prefijo completo.
+fn folder_name(prefix: &str) -> &str {
+    prefix
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(prefix)
 }
 
 fn info_lines(info: &BucketInfo) -> Vec<Line<'static>> {

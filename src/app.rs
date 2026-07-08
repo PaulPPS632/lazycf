@@ -16,10 +16,10 @@ use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, AccountRow, BindingEdit, ChooseDomain, Confirm, CorsEditForm, DomainChoice,
-    Help, HelpSection, HttpTest, ImageView, Message,
-    NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, RenameForm,
-    RouteField, RouteForm, TokenEntry, UploadForm, ZoneRef,
+    AccountPicker, AccountRow, BindingEdit, BucketDomains, ChooseDomain, ChoosePurpose, Confirm,
+    CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection, HttpTest, ImageView, Message,
+    NewBucket, NewFolder, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm,
+    RenameForm, RouteField, RouteForm, SearchInput, TokenEntry, UploadForm, ZoneRef,
 };
 use crate::components::r2::{BucketInfo, Entry, R2View};
 use crate::components::sidebar::Sidebar;
@@ -53,6 +53,8 @@ enum Focus {
     D1Results,
     R2Buckets,
     R2Objects,
+    /// Barra de filtro del navegador de objetos (solo se entra con `/`).
+    R2Filter,
 }
 
 /// Un token verificado, con su cliente HTTP y sus cuentas visibles.
@@ -99,6 +101,8 @@ pub struct App {
     r2: R2View,
     /// Objeto pendiente de URL prefirmada (a la espera de credenciales R2).
     pending_presign: Option<String>,
+    /// Señal de cancelación de la búsqueda profunda en vuelo.
+    search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
     // Componentes de shell.
     sidebar: Sidebar,
@@ -120,6 +124,7 @@ pub struct App {
     rect_d1_results: Option<Rect>,
     rect_r2: Option<Rect>,
     rect_r2_objects: Option<Rect>,
+    rect_r2_filter: Option<Rect>,
 }
 
 impl App {
@@ -149,6 +154,7 @@ impl App {
             d1: D1View::new(),
             r2: R2View::new(),
             pending_presign: None,
+            search_cancel: None,
             sidebar: Sidebar::new(),
             detail: Detail::new(),
             command_bar: CommandBar,
@@ -166,6 +172,7 @@ impl App {
             rect_d1_results: None,
             rect_r2: None,
             rect_r2_objects: None,
+            rect_r2_filter: None,
         };
 
         match secrets::load_tokens() {
@@ -248,6 +255,18 @@ impl App {
         if self.popup.is_some() {
             if let Some(action) = self.popup_key(key) {
                 self.dispatch(action);
+            }
+            return;
+        }
+
+        // La barra de filtro R2 captura todo el texto (incluidas q/?/A).
+        // Tab/Shift-Tab siguen el ciclo normal de paneles; el filtro se
+        // mantiene aplicado al salir.
+        if self.focus == Focus::R2Filter {
+            match key.code {
+                KeyCode::Tab => self.dispatch(Action::CycleFocus { back: false }),
+                KeyCode::BackTab => self.dispatch(Action::CycleFocus { back: true }),
+                _ => self.route_focus_key(key),
             }
             return;
         }
@@ -427,6 +446,12 @@ impl App {
             {
                 self.open_entry();
             }
+            return;
+        }
+        if let Some(r) = self.rect_r2_filter
+            && r.contains(pos)
+        {
+            self.focus = Focus::R2Filter;
         }
     }
 
@@ -508,7 +533,16 @@ impl App {
             && r.contains(pos)
         {
             self.focus = Focus::R2Objects;
-            self.r2.select_entry(delta);
+            // Scroll-down en la última fila con página pendiente → carga más.
+            if delta > 0
+                && self.r2.at_last_visible()
+                && self.r2.has_more()
+                && !self.r2.loading_objects
+            {
+                self.load_more_objects();
+            } else {
+                self.r2.select_entry(delta);
+            }
         }
     }
 
@@ -674,6 +708,8 @@ impl App {
                 KeyCode::Char('n') => self.open_new_bucket(),
                 KeyCode::Char('d') => self.confirm_delete_bucket(),
                 KeyCode::Char('c') => self.open_cors_edit(),
+                KeyCode::Char('p') => self.confirm_toggle_public(),
+                KeyCode::Char('t') => self.open_bucket_domains(),
                 KeyCode::Char('r') => self.load_buckets(),
                 _ => {}
             },
@@ -682,22 +718,59 @@ impl App {
                     self.r2.select_entry(-1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.r2.select_entry(1);
+                    // Última fila con página pendiente → carga más (sin envolver).
+                    if self.r2.at_last_visible()
+                        && self.r2.has_more()
+                        && !self.r2.loading_objects
+                    {
+                        self.load_more_objects();
+                    } else {
+                        self.r2.select_entry(1);
+                    }
                 }
+                KeyCode::Esc if self.r2.is_searching() => self.exit_search(),
                 KeyCode::Enter => self.open_entry(),
+                KeyCode::Backspace | KeyCode::Char('h') if self.r2.is_searching() => {
+                    self.exit_search();
+                }
                 KeyCode::Backspace | KeyCode::Char('h') if !self.r2.prefix.is_empty() => {
                     let parent = self.r2.parent_prefix();
                     self.navigate_to(parent);
                 }
-                KeyCode::Char('u') => self.open_upload(),
+                KeyCode::Char('/') => self.focus = Focus::R2Filter,
+                KeyCode::Char(' ') => self.toggle_mark(),
+                KeyCode::Char('s') if !self.r2.is_searching() => self.open_search(),
+                KeyCode::Char('n') if !self.r2.is_searching() => self.open_new_folder(),
+                KeyCode::Char('m') => self.open_move(),
+                KeyCode::Char('i') => self.show_object_info(),
+                KeyCode::Char('y') => self.copy_object_url(),
+                KeyCode::Char('u') if !self.r2.is_searching() => self.open_upload(),
                 KeyCode::Char('d') => self.spawn_download(),
                 KeyCode::Char('x') => self.confirm_delete_object(),
                 KeyCode::Char('p') => self.open_presign(),
                 KeyCode::Char('o') => self.open_object_browser(),
                 KeyCode::Char('e') => self.open_rename(),
                 KeyCode::Char('v') => self.spawn_preview(),
-                KeyCode::Char('r') => self.load_objects(),
+                KeyCode::Char('r') => {
+                    // En búsqueda, `r` relanza el mismo término.
+                    if let Some(t) = self.r2.search_term().map(String::from) {
+                        self.start_deep_search(t);
+                    } else {
+                        self.load_objects();
+                    }
+                }
                 _ => {}
+            },
+            Focus::R2Filter => match key.code {
+                KeyCode::Enter => self.focus = Focus::R2Objects, // fija el filtro
+                KeyCode::Esc => {
+                    self.r2.clear_filter();
+                    self.focus = Focus::R2Objects;
+                }
+                code => {
+                    edit_input(self.r2.filter_mut(), code);
+                    self.r2.apply_filter(); // live: recalcula en cada tecla
+                }
             },
         }
     }
@@ -744,6 +817,10 @@ impl App {
             Presign,
             CorsEdit,
             ChooseDomain,
+            SearchInput,
+            NewFolder,
+            BucketDomains,
+            DomainAdd,
             Message,
         }
         let kind = match self.popup.as_ref()? {
@@ -763,6 +840,10 @@ impl App {
             Popup::Presign(_) => Kind::Presign,
             Popup::CorsEdit(_) => Kind::CorsEdit,
             Popup::ChooseDomain(_) => Kind::ChooseDomain,
+            Popup::SearchInput(_) => Kind::SearchInput,
+            Popup::NewFolder(_) => Kind::NewFolder,
+            Popup::BucketDomains(_) => Kind::BucketDomains,
+            Popup::DomainAdd(_) => Kind::DomainAdd,
             // El visor de imagen se cierra con cualquier tecla, como Help.
             Popup::ImageView(_) => Kind::Help,
             Popup::Message(_) => Kind::Message,
@@ -1167,21 +1248,40 @@ impl App {
                     return None;
                 }
                 if key.code == KeyCode::Enter {
-                    let (old_key, name) = match self.popup.as_ref() {
-                        Some(Popup::Rename(r)) => (r.old_key.clone(), r.name.value().trim().to_string()),
+                    let (old_key, name, move_mode) = match self.popup.as_ref() {
+                        Some(Popup::Rename(r)) => (
+                            r.old_key.clone(),
+                            r.name.value().trim().to_string(),
+                            r.move_mode,
+                        ),
                         _ => return None,
                     };
                     if name.is_empty() {
                         if let Some(Popup::Rename(r)) = self.popup.as_mut() {
-                            r.error = Some("El nombre es obligatorio".into());
+                            r.error = Some(if move_mode {
+                                "La clave es obligatoria".into()
+                            } else {
+                                "El nombre es obligatorio".into()
+                            });
                         }
                         return None;
                     }
-                    let prefix = match old_key.rfind('/') {
-                        Some(i) => &old_key[..=i],
-                        None => "",
+                    // Mover edita la clave completa; renombrar conserva la carpeta.
+                    let new_key = if move_mode {
+                        name.trim_start_matches('/').to_string()
+                    } else {
+                        let prefix = match old_key.rfind('/') {
+                            Some(i) => &old_key[..=i],
+                            None => "",
+                        };
+                        format!("{prefix}{name}")
                     };
-                    let new_key = format!("{prefix}{name}");
+                    if move_mode && (new_key.is_empty() || new_key.ends_with('/')) {
+                        if let Some(Popup::Rename(r)) = self.popup.as_mut() {
+                            r.error = Some("La clave no puede terminar en '/'".into());
+                        }
+                        return None;
+                    }
                     if new_key == old_key {
                         self.popup = None;
                         return None;
@@ -1362,11 +1462,169 @@ impl App {
                             && let Some(choice) = c.selected()
                         {
                             let url = crate::api::r2::object_url(&choice.domain, &c.key);
+                            let purpose = c.purpose;
                             self.popup = None;
-                            self.open_url_in_browser(url);
+                            match purpose {
+                                ChoosePurpose::Abrir => self.open_url_in_browser(url),
+                                ChoosePurpose::Copiar => {
+                                    crate::tui::osc52_copy(&url);
+                                    self.status = format!("URL copiada: {url}");
+                                }
+                            }
                         }
                     }
                     _ => {}
+                }
+                None
+            }
+            Kind::SearchInput => match key.code {
+                KeyCode::Esc => {
+                    self.popup = None;
+                    None
+                }
+                KeyCode::Enter => {
+                    let term = match self.popup.as_ref() {
+                        Some(Popup::SearchInput(s)) => s.term.value().trim().to_string(),
+                        _ => String::new(),
+                    };
+                    if term.is_empty() {
+                        if let Some(Popup::SearchInput(s)) = self.popup.as_mut() {
+                            s.error = Some("El término es obligatorio".into());
+                        }
+                        None
+                    } else {
+                        self.popup = None;
+                        Some(Action::SearchObjects { term })
+                    }
+                }
+                _ => {
+                    if let Some(Popup::SearchInput(s)) = self.popup.as_mut() {
+                        edit_input(&mut s.term, key.code);
+                    }
+                    None
+                }
+            },
+            Kind::NewFolder => match key.code {
+                KeyCode::Esc => {
+                    self.popup = None;
+                    None
+                }
+                KeyCode::Enter => {
+                    let name = match self.popup.as_ref() {
+                        Some(Popup::NewFolder(f)) => f.name.value().trim().to_string(),
+                        _ => String::new(),
+                    };
+                    let error = if name.is_empty() {
+                        Some("El nombre es obligatorio".to_string())
+                    } else if name.contains('/') {
+                        Some("El nombre no puede contener '/'".to_string())
+                    } else if self
+                        .r2
+                        .folder_exists(&format!("{}{name}/", self.r2.prefix))
+                    {
+                        Some("Ya existe esa carpeta".to_string())
+                    } else {
+                        None
+                    };
+                    if let Some(e) = error {
+                        if let Some(Popup::NewFolder(f)) = self.popup.as_mut() {
+                            f.error = Some(e);
+                        }
+                        None
+                    } else {
+                        self.popup = None;
+                        Some(Action::CreateFolder { name })
+                    }
+                }
+                _ => {
+                    if let Some(Popup::NewFolder(f)) = self.popup.as_mut() {
+                        edit_input(&mut f.name, key.code);
+                    }
+                    None
+                }
+            },
+            Kind::BucketDomains => {
+                match key.code {
+                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if let Some(Popup::BucketDomains(d)) = self.popup.as_mut() {
+                            d.move_by(-1);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(Popup::BucketDomains(d)) = self.popup.as_mut() {
+                            d.move_by(1);
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        let bucket = match self.popup.as_ref() {
+                            Some(Popup::BucketDomains(d)) => d.bucket.clone(),
+                            _ => return None,
+                        };
+                        // Las zonas pueden no estar cargadas si no se pasó por DNS.
+                        if self.all_zones.is_empty() {
+                            self.load_zones();
+                        }
+                        let zones = self.account_zone_refs();
+                        self.popup = Some(Popup::DomainAdd(DomainAddForm::new(bucket, zones)));
+                    }
+                    KeyCode::Char('d' | 'x') => {
+                        if let Some(Popup::BucketDomains(d)) = self.popup.as_ref()
+                            && let Some(dom) = d.selected()
+                        {
+                            let bucket = d.bucket.clone();
+                            let domain = dom.domain.clone();
+                            self.popup = Some(Popup::Confirm(Confirm {
+                                title: "Quitar dominio".into(),
+                                body: format!(
+                                    "¿Desconectar {domain} del bucket {bucket}?\n(No borra la zona ni sus registros DNS.)"
+                                ),
+                                on_yes: Action::RemoveCustomDomain { bucket, domain },
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            }
+            Kind::DomainAdd => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::DomainAdd(f)) if f.submitting) {
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    if let Some(Popup::DomainAdd(f)) = self.popup.as_mut() {
+                        let Some(domain) = f.full_domain() else {
+                            f.error = Some("Selecciona un dominio (no hay zonas)".into());
+                            return None;
+                        };
+                        let zone_id = f.zone()?.id.clone();
+                        let bucket = f.bucket.clone();
+                        f.error = None;
+                        f.submitting = true;
+                        return Some(Action::AddCustomDomain {
+                            bucket,
+                            domain,
+                            zone_id,
+                        });
+                    }
+                    return None;
+                }
+                if let Some(Popup::DomainAdd(f)) = self.popup.as_mut() {
+                    match key.code {
+                        KeyCode::Up | KeyCode::BackTab => f.move_field(-1),
+                        KeyCode::Down | KeyCode::Tab => f.move_field(1),
+                        KeyCode::Left if f.field == 1 => f.cycle_zone(-1),
+                        KeyCode::Right if f.field == 1 => f.cycle_zone(1),
+                        code => {
+                            if f.field == 0 {
+                                edit_input(&mut f.subdomain, code);
+                            }
+                        }
+                    }
                 }
                 None
             }
@@ -1560,10 +1818,12 @@ impl App {
             Action::ZonesLoaded(zones) => {
                 self.all_zones = zones;
                 self.apply_account_filter();
-                // Si hay un form de ruta esperando zonas, rellénalo.
+                // Si hay un form esperando zonas (ruta o dominio R2), rellénalo.
                 let refs = self.account_zone_refs();
-                if let Some(Popup::RouteForm(f)) = self.popup.as_mut() {
-                    f.set_zones(refs);
+                match self.popup.as_mut() {
+                    Some(Popup::RouteForm(f)) => f.set_zones(refs),
+                    Some(Popup::DomainAdd(f)) => f.set_zones(refs),
+                    _ => {}
                 }
             }
             Action::RecordsLoaded { zone_id, records } => {
@@ -1865,8 +2125,54 @@ impl App {
                 }
             }
             Action::R2ObjectsError(e) => self.r2.set_objects_error(e),
+            Action::R2MoreObjectsLoaded {
+                bucket,
+                prefix,
+                list,
+            } => {
+                if self.r2.selected_name().as_deref() == Some(bucket.as_str()) {
+                    self.r2.append_objects(&prefix, list);
+                }
+            }
+            Action::SearchObjects { term } => self.start_deep_search(term),
+            Action::SearchProgress {
+                bucket,
+                generation,
+                page,
+                hits,
+            } => {
+                if self.r2.selected_name().as_deref() == Some(bucket.as_str())
+                    && self.r2.set_search_progress(generation, page, hits)
+                {
+                    self.status = format!("Buscando… página {page} · {hits} coincidencias");
+                }
+            }
+            Action::SearchResults {
+                bucket,
+                generation,
+                files,
+                pages,
+                capped,
+                error,
+            } => {
+                if self.r2.selected_name().as_deref() == Some(bucket.as_str()) {
+                    let n = files.len();
+                    if self.r2.set_search_results(generation, files, pages, capped) {
+                        self.search_cancel = None;
+                        self.status = match error {
+                            Some(e) => format!("Búsqueda parcial ({pages} pág.): ✗ {e}"),
+                            None if capped => {
+                                format!("{n} resultados (tope de 10.000 objetos alcanzado)")
+                            }
+                            None => format!("{n} resultados en {pages} página(s)"),
+                        };
+                    }
+                }
+            }
             Action::UploadObject { path } => self.spawn_upload(path),
             Action::DeleteObject { key } => self.spawn_delete_object(key),
+            Action::DeleteObjects { keys } => self.spawn_delete_objects(keys),
+            Action::CreateFolder { name } => self.spawn_create_folder(name),
             Action::RenameObject {
                 old_key,
                 new_key,
@@ -1877,13 +2183,25 @@ impl App {
                 if matches!(self.popup, Some(Popup::Upload(_)) | Some(Popup::Rename(_))) {
                     self.popup = None;
                 }
-                self.load_objects();
+                // Tras mutar en modo búsqueda se vuelve al browse (los
+                // resultados quedarían desactualizados y repetir la búsqueda
+                // costaría hasta 20 páginas).
+                if self.r2.is_searching() {
+                    self.exit_search();
+                } else {
+                    self.load_objects();
+                }
                 // El uso del bucket cambió: refresca la info.
                 if let Some(name) = self.r2.selected_name() {
                     self.load_bucket_info(name);
                 }
             }
-            Action::ObjectStatus(msg) => self.status = msg,
+            Action::ObjectStatus(msg) => {
+                self.status = msg;
+                // Si venía de un fallo al paginar, suelta el flag de carga
+                // sin tocar el listado (inocuo en el resto de casos).
+                self.r2.end_loading();
+            }
             Action::ObjectError(e) => {
                 if let Some(Popup::Upload(u)) = self.popup.as_mut() {
                     u.submitting = false;
@@ -1937,6 +2255,39 @@ impl App {
                 if let Some(Popup::CorsEdit(c)) = self.popup.as_mut() {
                     c.submitting = false;
                     c.error = Some(e);
+                } else {
+                    self.status = format!("Error: {e}");
+                }
+            }
+            Action::SetPublicDomain { bucket, enabled } => {
+                self.spawn_set_public_domain(bucket, enabled);
+            }
+            Action::AddCustomDomain {
+                bucket,
+                domain,
+                zone_id,
+            } => self.spawn_add_domain(bucket, domain, zone_id),
+            Action::RemoveCustomDomain { bucket, domain } => {
+                self.spawn_remove_domain(bucket, domain);
+            }
+            Action::DomainsMutated(msg) => {
+                self.status = msg;
+                // El popup de dominios es un snapshot: se cierra y se reabre
+                // con `t` cuando la info recargue.
+                if matches!(
+                    self.popup,
+                    Some(Popup::DomainAdd(_)) | Some(Popup::BucketDomains(_))
+                ) {
+                    self.popup = None;
+                }
+                if let Some(name) = self.r2.selected_name() {
+                    self.load_bucket_info(name);
+                }
+            }
+            Action::DomainError(e) => {
+                if let Some(Popup::DomainAdd(f)) = self.popup.as_mut() {
+                    f.submitting = false;
+                    f.error = Some(e);
                 } else {
                     self.status = format!("Error: {e}");
                 }
@@ -3089,7 +3440,10 @@ impl App {
         self.r2.begin_objects();
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
-            let action = match client.list_objects(&account_id, &bucket, &prefix).await {
+            let action = match client
+                .list_objects(&account_id, &bucket, &prefix, true, None)
+                .await
+            {
                 Ok(list) => Action::R2ObjectsLoaded {
                     bucket,
                     prefix,
@@ -3101,13 +3455,64 @@ impl App {
         });
     }
 
+    /// ↓ en la última fila con cursor pendiente: trae la página siguiente.
+    fn load_more_objects(&mut self) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let Some(cursor) = self.r2.next_cursor_cloned() else {
+            return;
+        };
+        let prefix = self.r2.prefix.clone();
+        self.r2.begin_objects(); // "cargando…" en el hint
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let action = match client
+                .list_objects(&account_id, &bucket, &prefix, true, Some(&cursor))
+                .await
+            {
+                Ok(list) => Action::R2MoreObjectsLoaded {
+                    bucket,
+                    prefix,
+                    list,
+                },
+                // No usa R2ObjectsError: su render sustituiría el listado
+                // entero. El cursor se conserva, ↓ reintenta.
+                Err(e) => Action::ObjectStatus(format!("✗ No se pudo cargar más: {e}")),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
     fn navigate_to(&mut self, prefix: String) {
+        self.r2.clear_filter();
+        self.r2.clear_marks();
         self.r2.prefix = prefix;
         self.load_objects();
     }
 
     /// Enter sobre una fila del navegador: carpeta → entrar; imagen → preview.
+    /// En modo búsqueda, navega a la carpeta contenedora del resultado.
     fn open_entry(&mut self) {
+        if self.r2.is_searching() {
+            if let Some(Entry::File(o)) = self.r2.selected_entry().cloned() {
+                let parent = o
+                    .key
+                    .rsplit_once('/')
+                    .map(|(d, _)| format!("{d}/"))
+                    .unwrap_or_default();
+                if let Some(c) = self.search_cancel.take() {
+                    c.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.r2.exit_search();
+                self.navigate_to(parent);
+            }
+            return;
+        }
         match self.r2.selected_entry().cloned() {
             Some(Entry::Up) => {
                 let parent = self.r2.parent_prefix();
@@ -3119,6 +3524,107 @@ impl App {
                 self.status = "d descargar · p URL prefirmada · v ver (imágenes)".into();
             }
             None => {}
+        }
+    }
+
+    /// `s`: pide el término de la búsqueda profunda.
+    fn open_search(&mut self) {
+        if self.r2.selected_name().is_none() {
+            return;
+        }
+        self.popup = Some(Popup::SearchInput(SearchInput::default()));
+    }
+
+    /// Pagina TODO el bucket (sin delimiter) filtrando por subcadena, con tope
+    /// de páginas. Emite progreso por página y el resultado final.
+    fn start_deep_search(&mut self, term: String) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Cancela la búsqueda anterior si seguía en vuelo.
+        if let Some(c) = self.search_cancel.take() {
+            c.store(true, Ordering::Relaxed);
+        }
+        let generation = self.r2.begin_search(term.clone());
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        self.search_cancel = Some(cancel.clone());
+        self.status = format!("Buscando «{term}»…");
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            const MAX_PAGES: usize = 20; // ~10k objetos
+            let needle = term.to_lowercase();
+            let mut files = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut pages = 0usize;
+            let mut capped = false;
+            let mut error = None;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return; // cancelada: ni parciales
+                }
+                match client
+                    .list_objects(&account_id, &bucket, "", false, cursor.as_deref())
+                    .await
+                {
+                    Ok(list) => {
+                        pages += 1;
+                        files.extend(
+                            list.files
+                                .into_iter()
+                                .filter(|o| o.key.to_lowercase().contains(&needle)),
+                        );
+                        let _ = tx.send(Action::SearchProgress {
+                            bucket: bucket.clone(),
+                            generation,
+                            page: pages,
+                            hits: files.len(),
+                        });
+                        cursor = list.cursor;
+                        if cursor.is_none() {
+                            break;
+                        }
+                        if pages >= MAX_PAGES {
+                            capped = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(Action::SearchResults {
+                bucket,
+                generation,
+                files,
+                pages,
+                capped,
+                error,
+            });
+        });
+    }
+
+    /// Esc/h en modo búsqueda: cancela y recarga el browse (prefijo intacto).
+    fn exit_search(&mut self) {
+        if let Some(c) = self.search_cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.r2.exit_search();
+        self.load_objects();
+    }
+
+    /// Espacio: marca/desmarca el archivo y avanza a la fila siguiente.
+    fn toggle_mark(&mut self) {
+        if self.r2.toggle_mark() {
+            self.r2.select_entry(1);
+        } else {
+            self.status = "Espacio marca archivos (no carpetas)".into();
         }
     }
 
@@ -3218,6 +3724,17 @@ impl App {
     }
 
     fn confirm_delete_object(&mut self) {
+        // Con marcas activas, `x` borra el lote (gana sobre el cursor).
+        let marked = self.r2.marked_keys();
+        if !marked.is_empty() {
+            let n = marked.len();
+            self.popup = Some(Popup::Confirm(Confirm {
+                title: "Borrar objetos".into(),
+                body: format!("¿Borrar {n} objeto(s) marcados? No se puede deshacer."),
+                on_yes: Action::DeleteObjects { keys: marked },
+            }));
+            return;
+        }
         let Some(file) = self.r2.selected_file() else {
             self.status = "Selecciona un archivo".into();
             return;
@@ -3229,6 +3746,39 @@ impl App {
             body: format!("¿Borrar {name}?"),
             on_yes: Action::DeleteObject { key },
         }));
+    }
+
+    /// Borra las claves marcadas en secuencia; para al primer error pero
+    /// siempre recarga (algo pudo borrarse ya).
+    fn spawn_delete_objects(&mut self, keys: Vec<String>) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let total = keys.len();
+        self.status = format!("Borrando {total} objeto(s)…");
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let mut ok = 0usize;
+            let mut fail: Option<String> = None;
+            for key in keys {
+                match client.delete_object(&account_id, &bucket, &key).await {
+                    Ok(()) => ok += 1,
+                    Err(e) => {
+                        fail = Some(format!("'{key}': {e}"));
+                        break;
+                    }
+                }
+            }
+            let msg = match fail {
+                None => format!("{ok} objeto(s) borrados"),
+                Some(err) => format!("Borrados {ok}/{total} · ✗ {err}"),
+            };
+            let _ = tx.send(Action::ObjectMutated(msg));
+        });
     }
 
     fn spawn_delete_object(&mut self, key: String) {
@@ -3259,9 +3809,57 @@ impl App {
         self.popup = Some(Popup::Rename(RenameForm {
             old_key: file.key.clone(),
             name: TextInput::new(file.filename().to_string()),
+            move_mode: false,
             error: None,
             submitting: false,
         }));
+    }
+
+    /// `m`: como renombrar pero editando la clave completa (cambia de carpeta).
+    fn open_move(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        self.popup = Some(Popup::Rename(RenameForm {
+            old_key: file.key.clone(),
+            name: TextInput::new(file.key.clone()),
+            move_mode: true,
+            error: None,
+            submitting: false,
+        }));
+    }
+
+    /// `n` (en Objetos): pide el nombre de la carpeta nueva.
+    fn open_new_folder(&mut self) {
+        if self.r2.selected_name().is_none() {
+            return;
+        }
+        self.popup = Some(Popup::NewFolder(NewFolder::default()));
+    }
+
+    /// Crea el prefijo subiendo un objeto marcador vacío (como el dashboard).
+    fn spawn_create_folder(&mut self, name: String) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let key = format!("{}{name}/", self.r2.prefix);
+        let tx = self.action_tx.clone();
+        self.status = "Creando carpeta…".into();
+        tokio::spawn(async move {
+            let action = match client
+                .put_object(&account_id, &bucket, &key, Vec::new(), "application/x-directory")
+                .await
+            {
+                Ok(()) => Action::ObjectMutated(format!("Carpeta {name}/ creada")),
+                Err(e) => Action::ObjectError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
     }
 
     /// Renombrar = descargar + subir con la nueva clave + borrar la vieja
@@ -3331,18 +3929,11 @@ impl App {
         }
     }
 
-    /// `o`: abre el objeto seleccionado con el dominio público/personalizado
-    /// del bucket. Sin fricción si solo hay un candidato; si hay varios,
-    /// deja elegir con un popup.
-    fn open_object_browser(&mut self) {
-        let Some(file) = self.r2.selected_file() else {
-            self.status = "Selecciona un archivo".into();
-            return;
-        };
-        let key = file.key.clone();
+    /// Candidatos de dominio del bucket actual para servir objetos: público
+    /// r2.dev (si está habilitado) + personalizados habilitados.
+    fn object_domain_choices(&self) -> Vec<DomainChoice> {
         let Some(info) = self.r2.info() else {
-            self.status = "Info del bucket no disponible todavía".into();
-            return;
+            return Vec::new();
         };
         let mut choices = Vec::new();
         if info.public.enabled && !info.public.domain.is_empty() {
@@ -3357,6 +3948,23 @@ impl App {
                 domain: d.domain.clone(),
             });
         }
+        choices
+    }
+
+    /// `o`: abre el objeto seleccionado con el dominio público/personalizado
+    /// del bucket. Sin fricción si solo hay un candidato; si hay varios,
+    /// deja elegir con un popup.
+    fn open_object_browser(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let key = file.key.clone();
+        if self.r2.info().is_none() {
+            self.status = "Info del bucket no disponible todavía".into();
+            return;
+        }
+        let choices = self.object_domain_choices();
         match choices.len() {
             0 => {
                 self.status = "Sin dominio público ni personalizado en este bucket".into();
@@ -3366,9 +3974,193 @@ impl App {
                 self.open_url_in_browser(url);
             }
             _ => {
-                self.popup = Some(Popup::ChooseDomain(ChooseDomain::new(key, choices)));
+                self.popup = Some(Popup::ChooseDomain(ChooseDomain::new(
+                    key,
+                    choices,
+                    ChoosePurpose::Abrir,
+                )));
             }
         }
+    }
+
+    /// `y`: copia la URL pública del objeto al portapapeles (OSC 52).
+    fn copy_object_url(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let key = file.key.clone();
+        if self.r2.info().is_none() {
+            self.status = "Info del bucket no disponible todavía".into();
+            return;
+        }
+        let choices = self.object_domain_choices();
+        match choices.len() {
+            0 => {
+                self.status = "Sin dominio público ni personalizado en este bucket".into();
+            }
+            1 => {
+                let url = crate::api::r2::object_url(&choices[0].domain, &key);
+                crate::tui::osc52_copy(&url);
+                self.status = format!("URL copiada: {url}");
+            }
+            _ => {
+                self.popup = Some(Popup::ChooseDomain(ChooseDomain::new(
+                    key,
+                    choices,
+                    ChoosePurpose::Copiar,
+                )));
+            }
+        }
+    }
+
+    /// `i`: metadatos del objeto seleccionado — todo sale del listado + info
+    /// del bucket (el API Bearer no ofrece HEAD de objeto).
+    fn show_object_info(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let title = file.filename().to_string();
+        let mut body = format!(
+            "Clave: {}\nTamaño: {} ({} bytes)\nModificado: {}\nContent-Type: {}",
+            file.key,
+            crate::components::r2::human_size(file.size),
+            file.size,
+            file.last_modified,
+            file.http_metadata
+                .as_ref()
+                .and_then(|m| m.content_type.as_deref())
+                .unwrap_or("—"),
+        );
+        let key = file.key.clone();
+        let urls: Vec<String> = self
+            .object_domain_choices()
+            .iter()
+            .map(|c| crate::api::r2::object_url(&c.domain, &key))
+            .collect();
+        if !urls.is_empty() {
+            body.push_str("\n\nURLs:");
+            for u in urls {
+                body.push_str(&format!("\n  {u}"));
+            }
+        }
+        self.popup = Some(Popup::Message(Message {
+            title,
+            body,
+            is_error: false,
+        }));
+    }
+
+    /// `p` (en Buckets): habilita/deshabilita el dominio público r2.dev con
+    /// aviso explícito — habilitarlo hace el bucket legible desde internet.
+    fn confirm_toggle_public(&mut self) {
+        let (Some(bucket), Some(info)) = (self.r2.selected_name(), self.r2.info()) else {
+            self.status = "Info del bucket no disponible todavía".into();
+            return;
+        };
+        if info.public.domain.is_empty() {
+            self.status = "Este bucket no tiene dominio r2.dev asignado".into();
+            return;
+        }
+        let enabled = !info.public.enabled;
+        let (title, body) = if enabled {
+            (
+                "Habilitar acceso público".to_string(),
+                format!(
+                    "Esto hará el bucket '{bucket}' PÚBLICO en internet:\n  https://{}\nCualquiera con la URL podrá leer los objetos. ¿Continuar?",
+                    info.public.domain
+                ),
+            )
+        } else {
+            (
+                "Deshabilitar acceso público".to_string(),
+                format!(
+                    "https://{} dejará de servir los objetos de '{bucket}'. ¿Continuar?",
+                    info.public.domain
+                ),
+            )
+        };
+        self.popup = Some(Popup::Confirm(Confirm {
+            title,
+            body,
+            on_yes: Action::SetPublicDomain { bucket, enabled },
+        }));
+    }
+
+    fn spawn_set_public_domain(&mut self, bucket: String, enabled: bool) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Actualizando dominio público…".into();
+        tokio::spawn(async move {
+            let action = match client.set_public_domain(&account_id, &bucket, enabled).await {
+                Ok(()) => Action::DomainsMutated(if enabled {
+                    "Dominio r2.dev habilitado (bucket público)".into()
+                } else {
+                    "Dominio r2.dev deshabilitado".into()
+                }),
+                Err(e) => Action::DomainError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    /// `t` (en Buckets): popup con los dominios personalizados del bucket.
+    fn open_bucket_domains(&mut self) {
+        let (Some(bucket), Some(info)) = (self.r2.selected_name(), self.r2.info()) else {
+            self.status = "Info del bucket no disponible todavía".into();
+            return;
+        };
+        self.popup = Some(Popup::BucketDomains(BucketDomains::new(
+            bucket,
+            info.domains.clone(),
+        )));
+    }
+
+    fn spawn_add_domain(&mut self, bucket: String, domain: String, zone_id: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = format!("Conectando {domain}…");
+        tokio::spawn(async move {
+            let action = match client
+                .add_custom_domain(&account_id, &bucket, &domain, &zone_id)
+                .await
+            {
+                Ok(()) => Action::DomainsMutated(format!(
+                    "Dominio {domain} conectado (el certificado tarda unos minutos)"
+                )),
+                Err(e) => Action::DomainError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn spawn_remove_domain(&mut self, bucket: String, domain: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = format!("Desconectando {domain}…");
+        tokio::spawn(async move {
+            let action = match client
+                .remove_custom_domain(&account_id, &bucket, &domain)
+                .await
+            {
+                Ok(()) => Action::DomainsMutated(format!("Dominio {domain} desconectado")),
+                Err(e) => Action::DomainError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
     }
 
     /// `c` (en Buckets): abre el editor de la política CORS del bucket actual.
@@ -3582,7 +4374,14 @@ impl App {
             Focus::D1Where,
             Focus::D1Results,
         ];
-        static R2_PANES: &[Focus] = &[Focus::Modules, Focus::R2Buckets, Focus::R2Objects];
+        // Orden visual: la barra de filtro va encima del listado (como la
+        // barra WHERE de D1 sobre los resultados).
+        static R2_PANES: &[Focus] = &[
+            Focus::Modules,
+            Focus::R2Buckets,
+            Focus::R2Filter,
+            Focus::R2Objects,
+        ];
         static BASE_PANES: &[Focus] = &[Focus::Modules];
         match self.sidebar.module() {
             Module::Dns => DNS_PANES,
@@ -3726,23 +4525,41 @@ impl App {
                     ("n", "nuevo bucket"),
                     ("d", "borrar bucket (con confirmación)"),
                     ("c", "editar política CORS (JSON)"),
+                    ("p", "dominio público r2.dev on/off"),
+                    ("t", "dominios personalizados (añadir/quitar)"),
                     ("r", "recargar buckets"),
                 ],
             ),
             Focus::R2Objects => HelpSection::new(
                 "Objetos R2",
                 vec![
-                    ("↑ ↓ / k j", "navegar objetos"),
+                    ("↑ ↓ / k j", "navegar (↓ al final carga más si hay 500+)"),
                     ("Enter", "abrir carpeta / ver imagen"),
-                    ("Backspace / h", "subir un nivel"),
+                    ("Backspace / h", "subir un nivel (o salir de la búsqueda)"),
+                    ("/", "filtrar la carpeta actual"),
+                    ("s", "buscar en todo el bucket"),
+                    ("Espacio", "marcar/desmarcar (x borra los marcados)"),
                     ("u", "subir un archivo local"),
+                    ("n", "nueva carpeta"),
                     ("d", "descargar a ~/Descargas y abrir"),
                     ("o", "abrir en el navegador (dominio público/personalizado)"),
+                    ("y", "copiar URL del objeto"),
+                    ("i", "metadatos del objeto"),
                     ("e", "renombrar objeto"),
+                    ("m", "mover objeto (editar la clave completa)"),
                     ("p", "URL prefirmada (pide credenciales R2 una vez)"),
                     ("v", "previsualizar imagen en el terminal"),
-                    ("x", "borrar objeto (con confirmación)"),
-                    ("r", "recargar listado"),
+                    ("x", "borrar objeto/marcados (con confirmación)"),
+                    ("r", "recargar listado (o repetir la búsqueda)"),
+                ],
+            ),
+            Focus::R2Filter => HelpSection::new(
+                "Filtro de objetos",
+                vec![
+                    ("(texto)", "filtra por nombre mientras escribes"),
+                    ("Enter", "fijar el filtro y volver al listado"),
+                    ("Tab / ⇧Tab", "cambiar de panel (el filtro se mantiene)"),
+                    ("Esc", "limpiar el filtro"),
                 ],
             ),
         });
@@ -3769,6 +4586,7 @@ impl App {
         self.rect_d1_results = None;
         self.rect_r2 = None;
         self.rect_r2_objects = None;
+        self.rect_r2_filter = None;
 
         self.sidebar.draw(
             frame,
@@ -3839,10 +4657,22 @@ impl App {
                 self.r2
                     .draw_buckets(frame, buckets_area, self.focus == Focus::R2Buckets);
                 self.r2.draw_info(frame, info_area);
+                // Barra de filtro siempre visible sobre el listado.
+                let rows = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints([
+                        ratatui::layout::Constraint::Length(3),
+                        ratatui::layout::Constraint::Min(1),
+                    ])
+                    .split(objects_area);
+                let (filter_area, obj_area) = (rows[0], rows[1]);
                 self.r2
-                    .draw_objects(frame, objects_area, self.focus == Focus::R2Objects);
+                    .draw_objects(frame, obj_area, self.focus == Focus::R2Objects);
+                self.r2
+                    .draw_filter(frame, filter_area, self.focus == Focus::R2Filter);
                 self.rect_r2 = Some(buckets_area);
-                self.rect_r2_objects = Some(objects_area);
+                self.rect_r2_objects = Some(obj_area);
+                self.rect_r2_filter = Some(filter_area);
             }
             _ => {
                 self.detail.draw(
@@ -3909,11 +4739,23 @@ impl App {
                     "↑↓←→ celda · Enter ver · y copiar · Y fila · PgUp/Dn · Tab →".into()
                 }
                 Focus::R2Buckets => {
-                    "↑↓ bucket · n nuevo · d borrar · c CORS · Tab → objetos · ?".into()
+                    "↑↓ bucket · n nuevo · c CORS · p público · t dominios · d borrar · ?".into()
                 }
                 Focus::R2Objects => {
-                    "Enter abrir · u subir · d descargar · e renombrar · o navegador · x borrar"
-                        .into()
+                    if self.r2.is_searching() {
+                        "Enter ir a carpeta · Esc volver · d y i x sobre el resultado · ?".into()
+                    } else if self.r2.marks_len() > 0 {
+                        format!(
+                            "{} marcado(s) · Espacio marcar · x borrar marcados · ? ayuda",
+                            self.r2.marks_len()
+                        )
+                    } else {
+                        "Enter abrir · / filtrar · s buscar · Espacio marcar · u d e m i y x · ?"
+                            .into()
+                    }
+                }
+                Focus::R2Filter => {
+                    "escribe para filtrar · Enter fijar · Esc limpiar · Tab panel".into()
                 }
             }
         };

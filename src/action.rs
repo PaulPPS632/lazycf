@@ -5,7 +5,7 @@ use crate::api::r2::ObjectList;
 use crate::components::r2::BucketInfo;
 use crate::model::{
     Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, QueryOutcome, R2Bucket,
-    Tunnel, WorkerMetrics, WorkerScript, Zone,
+    R2Object, Tunnel, WorkerMetrics, WorkerScript, Zone,
 };
 
 #[derive(Debug, Clone)]
@@ -245,6 +245,36 @@ pub enum Action {
         new_key: String,
         content_type: Option<String>,
     },
+    /// Página siguiente del listado actual (se añade al final, no reemplaza).
+    R2MoreObjectsLoaded {
+        bucket: String,
+        prefix: String,
+        list: ObjectList,
+    },
+    /// Lanzar la búsqueda profunda del término en todo el bucket (paginada).
+    SearchObjects { term: String },
+    /// Progreso de la búsqueda (una página recorrida). `generation` descarta
+    /// respuestas de búsquedas obsoletas.
+    SearchProgress {
+        bucket: String,
+        generation: u64,
+        page: usize,
+        hits: usize,
+    },
+    /// Resultado final de la búsqueda (parcial si `error` es `Some`).
+    SearchResults {
+        bucket: String,
+        generation: u64,
+        files: Vec<R2Object>,
+        pages: usize,
+        capped: bool,
+        error: Option<String>,
+    },
+    /// Borrar las claves marcadas (tras confirmación). Secuencial; para al
+    /// primer error pero siempre recarga el listado.
+    DeleteObjects { keys: Vec<String> },
+    /// Crear el marcador de carpeta `prefijo + nombre + "/"`.
+    CreateFolder { name: String },
     /// Mutación de objeto OK: fija estado y recarga el listado actual.
     ObjectMutated(String),
     /// Descarga completada (ruta local) o estado de objeto sin recarga.
@@ -269,4 +299,20 @@ pub enum Action {
     CorsMutated(String),
     /// Error al guardar CORS (mantiene el popup abierto para corregir).
     CorsError(String),
+
+    // --- R2: dominios ---
+    /// Habilitar/deshabilitar el dominio público r2.dev del bucket.
+    SetPublicDomain { bucket: String, enabled: bool },
+    /// Conectar un dominio personalizado (POST domains/custom, enabled=true).
+    AddCustomDomain {
+        bucket: String,
+        domain: String,
+        zone_id: String,
+    },
+    /// Desconectar un dominio personalizado del bucket.
+    RemoveCustomDomain { bucket: String, domain: String },
+    /// Mutación de dominios OK: estado, cierra popups de dominios y recarga info.
+    DomainsMutated(String),
+    /// Error de dominios (mantiene el form de añadir abierto si procede).
+    DomainError(String),
 }

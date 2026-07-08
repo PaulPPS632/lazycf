@@ -41,6 +41,8 @@ pub struct ObjectList {
     pub folders: Vec<String>,
     pub files: Vec<R2Object>,
     pub truncated: bool,
+    /// Cursor de la página siguiente (`result_info.cursor`), solo si `is_truncated`.
+    pub cursor: Option<String>,
 }
 
 impl CfClient {
@@ -93,6 +95,50 @@ impl CfClient {
         .await
     }
 
+    /// `PUT .../domains/managed` — habilita/deshabilita el dominio público r2.dev.
+    pub async fn set_public_domain(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        self.send_ok(
+            reqwest::Method::PUT,
+            &format!("/accounts/{account_id}/r2/buckets/{bucket}/domains/managed"),
+            Some(&json!({ "enabled": enabled })),
+        )
+        .await
+    }
+
+    /// `POST .../domains/custom` — conecta un dominio propio (zona de la cuenta).
+    pub async fn add_custom_domain(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        domain: &str,
+        zone_id: &str,
+    ) -> Result<()> {
+        self.send_ok(
+            reqwest::Method::POST,
+            &format!("/accounts/{account_id}/r2/buckets/{bucket}/domains/custom"),
+            Some(&json!({ "domain": domain, "zoneId": zone_id, "enabled": true })),
+        )
+        .await
+    }
+
+    /// `DELETE .../domains/custom/{domain}` — desconecta el dominio del bucket.
+    pub async fn remove_custom_domain(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        domain: &str,
+    ) -> Result<()> {
+        self.delete_ok(&format!(
+            "/accounts/{account_id}/r2/buckets/{bucket}/domains/custom/{domain}"
+        ))
+        .await
+    }
+
     /// `GET .../buckets/{name}/cors` — reglas CORS crudas (vacío si no hay política).
     pub async fn bucket_cors(&self, account_id: &str, name: &str) -> Result<Vec<serde_json::Value>> {
         #[derive(Deserialize, Default)]
@@ -139,17 +185,26 @@ impl CfClient {
             .await
     }
 
-    /// `GET .../objects?delimiter=/&prefix=…` — carpetas (`delimited`) + archivos.
+    /// `GET .../objects` — con `delimited` agrupa carpetas (`delimiter=/`);
+    /// sin él lista plano (búsqueda profunda). `cursor` pide la página siguiente.
     pub async fn list_objects(
         &self,
         account_id: &str,
         bucket: &str,
         prefix: &str,
+        delimited: bool,
+        cursor: Option<&str>,
     ) -> Result<ObjectList> {
-        let path = format!(
-            "/accounts/{account_id}/r2/buckets/{bucket}/objects?per_page=500&delimiter=%2F&prefix={}",
+        let mut path = format!(
+            "/accounts/{account_id}/r2/buckets/{bucket}/objects?per_page=500&prefix={}",
             percent_encode(prefix.as_bytes(), AWS_ENC)
         );
+        if delimited {
+            path.push_str("&delimiter=%2F");
+        }
+        if let Some(c) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(c.as_bytes(), AWS_ENC)));
+        }
         let v = self.get_value(&path).await?;
         let files: Vec<R2Object> =
             serde_json::from_value(v["result"].clone()).unwrap_or_default();
@@ -163,10 +218,19 @@ impl CfClient {
             })
             .unwrap_or_default();
         let truncated = v["result_info"]["is_truncated"].as_bool().unwrap_or(false);
+        let cursor = truncated
+            .then(|| {
+                v["result_info"]["cursor"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .flatten();
         Ok(ObjectList {
             folders,
             files,
             truncated,
+            cursor,
         })
     }
 

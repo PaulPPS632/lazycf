@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::action::Action;
 use crate::components::input::TextInput;
-use crate::model::{Binding, DnsRecord};
+use crate::model::{Binding, CustomDomain, DnsRecord};
 use crate::ui::{layout, theme};
 
 /// Popup activo.
@@ -46,8 +46,16 @@ pub enum Popup {
     BindingEdit(BindingEdit),
     /// Editor de la política CORS de un bucket R2 (JSON crudo).
     CorsEdit(CorsEditForm),
-    /// Elegir con qué dominio abrir un objeto R2 en el navegador.
+    /// Elegir con qué dominio abrir/copiar la URL de un objeto R2.
     ChooseDomain(ChooseDomain),
+    /// Término para la búsqueda profunda en todo el bucket.
+    SearchInput(SearchInput),
+    /// Nombre de la carpeta nueva (objeto marcador vacío).
+    NewFolder(NewFolder),
+    /// Dominios personalizados del bucket: lista + añadir/quitar.
+    BucketDomains(BucketDomains),
+    /// Conectar un dominio personalizado (subdominio + zona de la cuenta).
+    DomainAdd(DomainAddForm),
     /// Mensaje informativo o de error.
     Message(Message),
 }
@@ -142,8 +150,114 @@ pub struct NewBucket {
 pub struct RenameForm {
     pub old_key: String,
     pub name: TextInput,
+    /// `true` = mover: el input es la clave completa (permite cambiar de carpeta).
+    pub move_mode: bool,
     pub error: Option<String>,
     pub submitting: bool,
+}
+
+/// Término de búsqueda profunda (subcadena sobre las claves de todo el bucket).
+#[derive(Default)]
+pub struct SearchInput {
+    pub term: TextInput,
+    pub error: Option<String>,
+}
+
+/// Nombre de la carpeta nueva (crea el objeto marcador `prefijo/nombre/`).
+#[derive(Default)]
+pub struct NewFolder {
+    pub name: TextInput,
+    pub error: Option<String>,
+}
+
+/// Dominios personalizados de un bucket (snapshot de `BucketInfo.domains`).
+pub struct BucketDomains {
+    pub bucket: String,
+    pub rows: Vec<CustomDomain>,
+    pub state: ListState,
+}
+
+impl BucketDomains {
+    pub fn new(bucket: String, rows: Vec<CustomDomain>) -> Self {
+        let mut state = ListState::default();
+        state.select((!rows.is_empty()).then_some(0));
+        Self { bucket, rows, state }
+    }
+
+    pub fn move_by(&mut self, delta: i32) {
+        let len = self.rows.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.state.selected().unwrap_or(0) as i32;
+        let n = len as i32;
+        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+    }
+
+    pub fn selected(&self) -> Option<&CustomDomain> {
+        self.state.selected().and_then(|i| self.rows.get(i))
+    }
+}
+
+/// Conectar un dominio personalizado al bucket: subdominio + zona de la cuenta.
+pub struct DomainAddForm {
+    pub bucket: String,
+    pub subdomain: TextInput,
+    pub zones: Vec<ZoneRef>,
+    pub zone_idx: usize,
+    /// 0 = subdominio, 1 = zona (select con ←→).
+    pub field: usize,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
+impl DomainAddForm {
+    pub fn new(bucket: String, zones: Vec<ZoneRef>) -> Self {
+        Self {
+            bucket,
+            subdomain: TextInput::default(),
+            zones,
+            zone_idx: 0,
+            field: 0,
+            error: None,
+            submitting: false,
+        }
+    }
+
+    pub fn move_field(&mut self, delta: i32) {
+        self.field = ((((self.field as i32 + delta) % 2) + 2) % 2) as usize;
+    }
+
+    /// Rellena las zonas si aún estaban vacías (llegaron tras abrir el form).
+    pub fn set_zones(&mut self, zones: Vec<ZoneRef>) {
+        if self.zones.is_empty() {
+            self.zones = zones;
+            self.zone_idx = 0;
+        }
+    }
+
+    pub fn cycle_zone(&mut self, delta: i32) {
+        let n = self.zones.len() as i32;
+        if n == 0 {
+            return;
+        }
+        self.zone_idx = ((((self.zone_idx as i32 + delta) % n) + n) % n) as usize;
+    }
+
+    pub fn zone(&self) -> Option<&ZoneRef> {
+        self.zones.get(self.zone_idx)
+    }
+
+    /// Dominio completo: `sub.zona`, o el apex si el subdominio está vacío.
+    pub fn full_domain(&self) -> Option<String> {
+        let zone = &self.zone()?.name;
+        let sub = self.subdomain.value().trim();
+        Some(if sub.is_empty() {
+            zone.clone()
+        } else {
+            format!("{sub}.{zone}")
+        })
+    }
 }
 
 /// Subir un archivo local al prefijo actual del bucket.
@@ -193,19 +307,34 @@ pub struct DomainChoice {
     pub domain: String,
 }
 
-/// Selección de dominio para abrir un objeto R2 en el navegador.
+/// Qué hacer con la URL del objeto al elegir dominio.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChoosePurpose {
+    /// Abrir en el navegador.
+    Abrir,
+    /// Copiar al portapapeles (OSC 52).
+    Copiar,
+}
+
+/// Selección de dominio para abrir/copiar la URL de un objeto R2.
 pub struct ChooseDomain {
     /// Clave del objeto (para construir la URL al confirmar).
     pub key: String,
+    pub purpose: ChoosePurpose,
     pub choices: Vec<DomainChoice>,
     pub state: ListState,
 }
 
 impl ChooseDomain {
-    pub fn new(key: String, choices: Vec<DomainChoice>) -> Self {
+    pub fn new(key: String, choices: Vec<DomainChoice>, purpose: ChoosePurpose) -> Self {
         let mut state = ListState::default();
         state.select((!choices.is_empty()).then_some(0));
-        Self { key, choices, state }
+        Self {
+            key,
+            purpose,
+            choices,
+            state,
+        }
     }
 
     pub fn move_by(&mut self, delta: i32) {
@@ -625,6 +754,10 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::BindingEdit(b) => draw_binding_edit(frame, area, b),
         Popup::CorsEdit(c) => draw_cors_edit(frame, area, c),
         Popup::ChooseDomain(c) => draw_choose_domain(frame, area, c),
+        Popup::SearchInput(s) => draw_search_input(frame, area, s),
+        Popup::NewFolder(f) => draw_new_folder(frame, area, f),
+        Popup::BucketDomains(d) => draw_bucket_domains(frame, area, d),
+        Popup::DomainAdd(f) => draw_domain_add(frame, area, f),
         Popup::Message(msg) => draw_message(frame, area, msg),
     }
 }
@@ -768,33 +901,53 @@ fn draw_upload(frame: &mut Frame, area: Rect, u: &UploadForm) {
 }
 
 fn draw_rename(frame: &mut Frame, area: Rect, r: &RenameForm) {
-    let rect = layout::centered(area, 70, 9);
+    let rect = layout::centered(area, if r.move_mode { 76 } else { 70 }, 10);
     frame.render_widget(Clear, rect);
-    let old_name = r.old_key.rsplit('/').next().unwrap_or(&r.old_key);
+    // Renombrar muestra solo el nombre de archivo; mover, la clave completa.
+    let shown_old = if r.move_mode {
+        r.old_key.as_str()
+    } else {
+        r.old_key.rsplit('/').next().unwrap_or(&r.old_key)
+    };
+    let verb = if r.move_mode { "Moviendo…" } else { "Renombrando…" };
     let status: Line = if r.submitting {
-        Line::from(Span::styled("Renombrando…", Style::default().fg(theme::ACCENT)))
+        Line::from(Span::styled(verb, Style::default().fg(theme::ACCENT)))
     } else if let Some(e) = &r.error {
         Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR)))
+    } else if r.move_mode {
+        Line::from(Span::styled(
+            "Enter mover · Esc cancelar · sobrescribe si el destino ya existe fuera de lo listado",
+            Style::default().fg(theme::DIM),
+        ))
     } else {
         Line::from(Span::styled(
             "Enter renombrar · Esc cancelar",
             Style::default().fg(theme::DIM),
         ))
     };
+    let label = if r.move_mode {
+        "Clave destino (con carpeta):"
+    } else {
+        "Nuevo nombre:"
+    };
     let body = Paragraph::new(vec![
         Line::from(Span::styled(
-            format!("Actual: {old_name}"),
+            format!("Actual: {shown_old}"),
             Style::default().fg(theme::DIM),
         )),
         Line::from(""),
-        Line::from("Nuevo nombre:"),
+        Line::from(label),
         Line::from(r.name.spans(!r.submitting)),
         Line::from(""),
         status,
     ])
     .block(
         Block::bordered()
-            .title(" ✎ Renombrar objeto ")
+            .title(if r.move_mode {
+                " ⇢ Mover objeto "
+            } else {
+                " ✎ Renombrar objeto "
+            })
             .border_style(theme::border(true))
             .title_style(theme::title(true)),
     )
@@ -1307,6 +1460,10 @@ fn draw_choose_domain(frame: &mut Frame, area: Rect, c: &mut ChooseDomain) {
     let h = (c.choices.len() as u16 + 4).clamp(6, 14);
     let rect = layout::centered(area, 66, h);
     frame.render_widget(Clear, rect);
+    let (title, bottom) = match c.purpose {
+        ChoosePurpose::Abrir => (" Abrir objeto — elige dominio ", " Enter abrir · Esc cancelar "),
+        ChoosePurpose::Copiar => (" Copiar URL — elige dominio ", " Enter copiar · Esc cancelar "),
+    };
     let items: Vec<ListItem> = c
         .choices
         .iter()
@@ -1315,14 +1472,184 @@ fn draw_choose_domain(frame: &mut Frame, area: Rect, c: &mut ChooseDomain) {
     let list = List::new(items)
         .block(
             Block::bordered()
-                .title(" Abrir objeto — elige dominio ")
-                .title_bottom(" Enter abrir · Esc cancelar ")
+                .title(title)
+                .title_bottom(bottom)
                 .border_style(theme::border(true))
                 .title_style(theme::title(true)),
         )
         .highlight_style(theme::selection())
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, rect, &mut c.state);
+}
+
+fn draw_search_input(frame: &mut Frame, area: Rect, s: &SearchInput) {
+    let rect = layout::centered(area, 62, 8);
+    frame.render_widget(Clear, rect);
+    let status: Line = match &s.error {
+        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        None => Line::from(Span::styled(
+            "Enter buscar · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )),
+    };
+    let body = Paragraph::new(vec![
+        Line::from("Término (subcadena, sin distinguir mayúsculas):"),
+        Line::from(""),
+        Line::from(s.term.spans(true)),
+        Line::from(""),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" 🔎 Buscar en el bucket ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    );
+    frame.render_widget(body, rect);
+}
+
+fn draw_new_folder(frame: &mut Frame, area: Rect, f: &NewFolder) {
+    let rect = layout::centered(area, 62, 9);
+    frame.render_widget(Clear, rect);
+    let status: Line = match &f.error {
+        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        None => Line::from(Span::styled(
+            "Enter crear · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )),
+    };
+    let body = Paragraph::new(vec![
+        Line::from("Nombre de la carpeta:"),
+        Line::from(""),
+        Line::from(f.name.spans(true)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Se crea un objeto marcador vacío (como en el dashboard)",
+            Style::default().fg(theme::DIM),
+        )),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" 📁 Nueva carpeta ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    )
+    .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
+}
+
+fn draw_bucket_domains(frame: &mut Frame, area: Rect, d: &mut BucketDomains) {
+    let h = (d.rows.len() as u16 + 4).clamp(6, 16);
+    let rect = layout::centered(area, 66, h);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(format!(" 🌐 Dominios · {} ", d.bucket))
+        .title_bottom(" a añadir · d quitar · Esc ")
+        .border_style(theme::border(true))
+        .title_style(theme::title(true));
+    if d.rows.is_empty() {
+        let body = Paragraph::new("Sin dominios personalizados · pulsa 'a' para conectar uno")
+            .block(block)
+            .style(Style::default().fg(theme::DIM))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, rect);
+        return;
+    }
+    let items: Vec<ListItem> = d
+        .rows
+        .iter()
+        .map(|dom| {
+            let (text, color) = if dom.enabled {
+                (dom.domain.clone(), theme::FG)
+            } else {
+                (format!("{} (deshabilitado)", dom.domain), theme::DIM)
+            };
+            ListItem::new(Line::from(Span::styled(text, Style::default().fg(color))))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::selection())
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, rect, &mut d.state);
+}
+
+fn draw_domain_add(frame: &mut Frame, area: Rect, f: &DomainAddForm) {
+    let row = |label: &str, value: Vec<Span<'static>>, active: bool| -> Line<'static> {
+        let marker = if active { "▶ " } else { "  " };
+        let label_style = if active {
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::DIM)
+        };
+        let mut spans = vec![Span::styled(format!("{marker}{label:<11}"), label_style)];
+        spans.extend(value);
+        Line::from(spans)
+    };
+
+    let sub_active = f.field == 0;
+    let sub_val = if f.subdomain.value().is_empty() && !sub_active {
+        vec![Span::styled(
+            "assets, cdn (vacío = apex)".to_string(),
+            Style::default().fg(theme::DIM),
+        )]
+    } else {
+        f.subdomain.spans(sub_active)
+    };
+    let zone_active = f.field == 1;
+    let zone_val = match f.zone() {
+        Some(z) if zone_active => vec![Span::styled(
+            format!("‹ {} ›", z.name),
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        )],
+        Some(z) => vec![Span::styled(z.name.clone(), Style::default().fg(theme::FG))],
+        None => vec![Span::styled(
+            "(sin zonas en la cuenta)".to_string(),
+            Style::default().fg(theme::ERROR),
+        )],
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Bucket: {}", f.bucket),
+            Style::default().fg(theme::DIM),
+        )),
+        row("Subdominio", sub_val, sub_active),
+        row("Dominio", zone_val, zone_active),
+        Line::from(vec![
+            Span::styled("  Host completo ", Style::default().fg(theme::DIM)),
+            Span::styled(
+                f.full_domain().unwrap_or_else(|| "—".into()),
+                Style::default().fg(theme::ACCENT),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    let hint = if f.submitting {
+        Span::styled("Conectando…", Style::default().fg(theme::ACCENT))
+    } else if let Some(e) = &f.error {
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+    } else {
+        Span::styled(
+            "↑↓ campo · ←→ dominio · Enter conectar · Esc",
+            Style::default().fg(theme::DIM),
+        )
+    };
+    lines.push(Line::from(hint));
+
+    let height = (lines.len() as u16 + 2).clamp(9, area.height);
+    let rect = layout::centered(area, 70, height);
+    frame.render_widget(Clear, rect);
+    let body = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(" ＋ Conectar dominio ")
+                .border_style(theme::border(true))
+                .title_style(theme::title(true)),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
 }
 
 fn draw_account_picker(frame: &mut Frame, area: Rect, p: &mut AccountPicker) {
