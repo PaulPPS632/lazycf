@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::CfClient;
-use crate::model::{R2Bucket, R2Object, R2Usage};
+use crate::model::{CustomDomain, PublicDomain, R2Bucket, R2Object, R2Usage};
 
 /// Codificación estilo AWS: todo salvo no-reservados (`A-Za-z0-9 - . _ ~`).
 const AWS_ENC: &AsciiSet = &NON_ALPHANUMERIC
@@ -27,6 +27,12 @@ const AWS_PATH_ENC: &AsciiSet = &NON_ALPHANUMERIC
 /// Clave de objeto codificada para la ruta REST (v4 exige `/` codificado).
 fn key_enc(key: &str) -> String {
     percent_encode(key.as_bytes(), AWS_ENC).to_string()
+}
+
+/// URL pública de un objeto servido por un dominio (público r2.dev o
+/// personalizado). Conserva `/` en la clave (carpetas virtuales).
+pub fn object_url(domain: &str, key: &str) -> String {
+    format!("https://{domain}/{}", percent_encode(key.as_bytes(), AWS_PATH_ENC))
 }
 
 /// Resultado de listar objetos con `delimiter=/`.
@@ -64,34 +70,56 @@ impl CfClient {
     }
 
     /// `GET .../buckets/{name}/domains/custom` — dominios personalizados del bucket.
-    pub async fn bucket_domains(&self, account_id: &str, name: &str) -> Result<Vec<String>> {
+    pub async fn bucket_domains(&self, account_id: &str, name: &str) -> Result<Vec<CustomDomain>> {
         #[derive(Deserialize)]
         struct Resp {
             #[serde(default)]
-            domains: Vec<Domain>,
-        }
-        #[derive(Deserialize)]
-        struct Domain {
-            #[serde(default)]
-            domain: String,
-            #[serde(default)]
-            enabled: bool,
+            domains: Vec<CustomDomain>,
         }
         let r: Resp = self
             .get(&format!(
                 "/accounts/{account_id}/r2/buckets/{name}/domains/custom"
             ))
             .await?;
-        Ok(r.domains
-            .into_iter()
-            .map(|d| {
-                if d.enabled {
-                    d.domain
-                } else {
-                    format!("{} (deshabilitado)", d.domain)
-                }
-            })
-            .collect())
+        Ok(r.domains)
+    }
+
+    /// `GET .../buckets/{name}/domains/managed` — dominio público r2.dev. El
+    /// dominio existe aunque `enabled` sea `false` (pre-asignado al crear el bucket).
+    pub async fn bucket_public_domain(&self, account_id: &str, name: &str) -> Result<PublicDomain> {
+        self.get(&format!(
+            "/accounts/{account_id}/r2/buckets/{name}/domains/managed"
+        ))
+        .await
+    }
+
+    /// `GET .../buckets/{name}/cors` — reglas CORS crudas (vacío si no hay política).
+    pub async fn bucket_cors(&self, account_id: &str, name: &str) -> Result<Vec<serde_json::Value>> {
+        #[derive(Deserialize, Default)]
+        struct Resp {
+            #[serde(default)]
+            rules: Vec<serde_json::Value>,
+        }
+        let v = self
+            .get_value(&format!("/accounts/{account_id}/r2/buckets/{name}/cors"))
+            .await?;
+        let r: Resp = serde_json::from_value(v["result"].clone()).unwrap_or_default();
+        Ok(r.rules)
+    }
+
+    /// `PUT .../buckets/{name}/cors` — reemplaza la política CORS completa.
+    pub async fn set_bucket_cors(
+        &self,
+        account_id: &str,
+        name: &str,
+        rules: serde_json::Value,
+    ) -> Result<()> {
+        self.send_ok(
+            reqwest::Method::PUT,
+            &format!("/accounts/{account_id}/r2/buckets/{name}/cors"),
+            Some(&json!({ "rules": rules })),
+        )
+        .await
     }
 
     /// `POST /accounts/{id}/r2/buckets` — crea un bucket.

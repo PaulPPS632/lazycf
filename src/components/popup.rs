@@ -28,6 +28,8 @@ pub enum Popup {
     NewBucket(NewBucket),
     /// Subir un archivo a R2.
     Upload(UploadForm),
+    /// Renombrar un objeto R2.
+    Rename(RenameForm),
     /// Pedir credenciales R2 (para URLs prefirmadas).
     R2Creds(R2CredsForm),
     /// Pedir expiración de la URL prefirmada.
@@ -42,6 +44,10 @@ pub enum Popup {
     HttpTest(HttpTest),
     /// Editar/añadir una variable o secreto de un Worker.
     BindingEdit(BindingEdit),
+    /// Editor de la política CORS de un bucket R2 (JSON crudo).
+    CorsEdit(CorsEditForm),
+    /// Elegir con qué dominio abrir un objeto R2 en el navegador.
+    ChooseDomain(ChooseDomain),
     /// Mensaje informativo o de error.
     Message(Message),
 }
@@ -131,6 +137,15 @@ pub struct NewBucket {
     pub error: Option<String>,
 }
 
+/// Renombrar un objeto R2 (dentro de la misma carpeta): solo cambia el
+/// nombre de archivo, el prefijo/carpeta se mantiene.
+pub struct RenameForm {
+    pub old_key: String,
+    pub name: TextInput,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
 /// Subir un archivo local al prefijo actual del bucket.
 #[derive(Default)]
 pub struct UploadForm {
@@ -162,6 +177,50 @@ pub struct PresignForm {
 pub struct ImageView {
     pub title: String,
     pub lines: Vec<Line<'static>>,
+}
+
+/// Editor de la política CORS de un bucket (JSON crudo, multilínea).
+pub struct CorsEditForm {
+    pub bucket: String,
+    pub json: TextInput,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
+/// Una URL candidata para abrir un objeto (dominio público o personalizado).
+pub struct DomainChoice {
+    pub label: String,
+    pub domain: String,
+}
+
+/// Selección de dominio para abrir un objeto R2 en el navegador.
+pub struct ChooseDomain {
+    /// Clave del objeto (para construir la URL al confirmar).
+    pub key: String,
+    pub choices: Vec<DomainChoice>,
+    pub state: ListState,
+}
+
+impl ChooseDomain {
+    pub fn new(key: String, choices: Vec<DomainChoice>) -> Self {
+        let mut state = ListState::default();
+        state.select((!choices.is_empty()).then_some(0));
+        Self { key, choices, state }
+    }
+
+    pub fn move_by(&mut self, delta: i32) {
+        let len = self.choices.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.state.selected().unwrap_or(0) as i32;
+        let n = len as i32;
+        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+    }
+
+    pub fn selected(&self) -> Option<&DomainChoice> {
+        self.state.selected().and_then(|i| self.choices.get(i))
+    }
 }
 
 /// Prueba HTTP: URL a golpear.
@@ -556,6 +615,7 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::NewTunnel(t) => draw_new_tunnel(frame, area, t),
         Popup::NewBucket(b) => draw_new_bucket(frame, area, b),
         Popup::Upload(u) => draw_upload(frame, area, u),
+        Popup::Rename(r) => draw_rename(frame, area, r),
         Popup::R2Creds(c) => draw_r2_creds(frame, area, c),
         Popup::Presign(p) => draw_presign(frame, area, p),
         Popup::ImageView(v) => draw_image_view(frame, area, v),
@@ -563,6 +623,8 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::RouteForm(f) => draw_route_form(frame, area, f),
         Popup::HttpTest(t) => draw_http_test(frame, area, t),
         Popup::BindingEdit(b) => draw_binding_edit(frame, area, b),
+        Popup::CorsEdit(c) => draw_cors_edit(frame, area, c),
+        Popup::ChooseDomain(c) => draw_choose_domain(frame, area, c),
         Popup::Message(msg) => draw_message(frame, area, msg),
     }
 }
@@ -698,6 +760,41 @@ fn draw_upload(frame: &mut Frame, area: Rect, u: &UploadForm) {
     .block(
         Block::bordered()
             .title(" ⬆ Subir objeto ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    )
+    .wrap(Wrap { trim: true });
+    frame.render_widget(body, rect);
+}
+
+fn draw_rename(frame: &mut Frame, area: Rect, r: &RenameForm) {
+    let rect = layout::centered(area, 70, 9);
+    frame.render_widget(Clear, rect);
+    let old_name = r.old_key.rsplit('/').next().unwrap_or(&r.old_key);
+    let status: Line = if r.submitting {
+        Line::from(Span::styled("Renombrando…", Style::default().fg(theme::ACCENT)))
+    } else if let Some(e) = &r.error {
+        Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR)))
+    } else {
+        Line::from(Span::styled(
+            "Enter renombrar · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        ))
+    };
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!("Actual: {old_name}"),
+            Style::default().fg(theme::DIM),
+        )),
+        Line::from(""),
+        Line::from("Nuevo nombre:"),
+        Line::from(r.name.spans(!r.submitting)),
+        Line::from(""),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" ✎ Renombrar objeto ")
             .border_style(theme::border(true))
             .title_style(theme::title(true)),
     )
@@ -1171,6 +1268,61 @@ fn draw_confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
     )
     .wrap(Wrap { trim: true });
     frame.render_widget(body, rect);
+}
+
+fn draw_cors_edit(frame: &mut Frame, area: Rect, c: &CorsEditForm) {
+    // Popup grande (editor JSON multilínea), como el editor SQL de D1.
+    let width = (area.width.saturating_mul(4) / 5).max(40);
+    let height = (area.height.saturating_mul(4) / 5).max(10);
+    let rect = layout::centered(area, width, height);
+    frame.render_widget(Clear, rect);
+
+    let block = Block::bordered()
+        .title(format!(" ⚙ CORS · {} ", c.bucket))
+        .border_style(theme::border(true))
+        .title_style(theme::title(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let rows = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([ratatui::layout::Constraint::Min(1), ratatui::layout::Constraint::Length(1)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(c.json.lines(true)), rows[0]);
+
+    let hint = if c.submitting {
+        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+    } else if let Some(e) = &c.error {
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+    } else {
+        Span::styled(
+            "Ctrl+Enter / F5 guardar · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )
+    };
+    frame.render_widget(Paragraph::new(Line::from(hint)), rows[1]);
+}
+
+fn draw_choose_domain(frame: &mut Frame, area: Rect, c: &mut ChooseDomain) {
+    let h = (c.choices.len() as u16 + 4).clamp(6, 14);
+    let rect = layout::centered(area, 66, h);
+    frame.render_widget(Clear, rect);
+    let items: Vec<ListItem> = c
+        .choices
+        .iter()
+        .map(|d| ListItem::new(Line::from(Span::styled(d.label.clone(), Style::default().fg(theme::FG)))))
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .title(" Abrir objeto — elige dominio ")
+                .title_bottom(" Enter abrir · Esc cancelar ")
+                .border_style(theme::border(true))
+                .title_style(theme::title(true)),
+        )
+        .highlight_style(theme::selection())
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, rect, &mut c.state);
 }
 
 fn draw_account_picker(frame: &mut Frame, area: Rect, p: &mut AccountPicker) {

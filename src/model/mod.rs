@@ -292,6 +292,24 @@ pub struct R2Usage {
     pub object_count: String,
 }
 
+/// Dominio personalizado de un bucket R2 (`.../domains/custom`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct CustomDomain {
+    pub domain: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Dominio público administrado (`.../domains/managed`, r2.dev). El dominio
+/// existe aunque `enabled` sea `false` (se pre-asigna al crear el bucket).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PublicDomain {
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 impl R2Usage {
     pub fn payload(&self) -> u64 {
         self.payload_size.parse().unwrap_or(0)

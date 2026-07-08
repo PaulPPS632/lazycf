@@ -239,6 +239,12 @@ pub enum Action {
     UploadObject { path: String },
     /// Borrar el objeto `key` (tras confirmación).
     DeleteObject { key: String },
+    /// Renombrar (copiar + borrar) un objeto dentro de la misma carpeta.
+    RenameObject {
+        old_key: String,
+        new_key: String,
+        content_type: Option<String>,
+    },
     /// Mutación de objeto OK: fija estado y recarga el listado actual.
     ObjectMutated(String),
     /// Descarga completada (ruta local) o estado de objeto sin recarga.
@@ -254,4 +260,13 @@ pub enum Action {
         key: String,
         result: Result<(u32, u32, Vec<u8>), String>,
     },
+    /// Guardar la política CORS de un bucket (JSON ya validado).
+    SaveCors {
+        bucket: String,
+        rules: serde_json::Value,
+    },
+    /// CORS guardado OK: fija estado, cierra el popup y recarga solo ese bucket.
+    CorsMutated(String),
+    /// Error al guardar CORS (mantiene el popup abierto para corregir).
+    CorsError(String),
 }

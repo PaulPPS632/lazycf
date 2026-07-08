@@ -16,10 +16,10 @@ use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, AccountRow, BindingEdit, Confirm, Help, HelpSection, HttpTest, ImageView,
-    Message,
-    NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, RouteField,
-    RouteForm, TokenEntry, UploadForm, ZoneRef,
+    AccountPicker, AccountRow, BindingEdit, ChooseDomain, Confirm, CorsEditForm, DomainChoice,
+    Help, HelpSection, HttpTest, ImageView, Message,
+    NewBucket, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm, RenameForm,
+    RouteField, RouteForm, TokenEntry, UploadForm, ZoneRef,
 };
 use crate::components::r2::{BucketInfo, Entry, R2View};
 use crate::components::sidebar::Sidebar;
@@ -673,6 +673,7 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.change_bucket(1),
                 KeyCode::Char('n') => self.open_new_bucket(),
                 KeyCode::Char('d') => self.confirm_delete_bucket(),
+                KeyCode::Char('c') => self.open_cors_edit(),
                 KeyCode::Char('r') => self.load_buckets(),
                 _ => {}
             },
@@ -692,6 +693,8 @@ impl App {
                 KeyCode::Char('d') => self.spawn_download(),
                 KeyCode::Char('x') => self.confirm_delete_object(),
                 KeyCode::Char('p') => self.open_presign(),
+                KeyCode::Char('o') => self.open_object_browser(),
+                KeyCode::Char('e') => self.open_rename(),
                 KeyCode::Char('v') => self.spawn_preview(),
                 KeyCode::Char('r') => self.load_objects(),
                 _ => {}
@@ -736,8 +739,11 @@ impl App {
             HttpTest,
             BindingEdit,
             Upload,
+            Rename,
             R2Creds,
             Presign,
+            CorsEdit,
+            ChooseDomain,
             Message,
         }
         let kind = match self.popup.as_ref()? {
@@ -752,8 +758,11 @@ impl App {
             Popup::HttpTest(_) => Kind::HttpTest,
             Popup::BindingEdit(_) => Kind::BindingEdit,
             Popup::Upload(_) => Kind::Upload,
+            Popup::Rename(_) => Kind::Rename,
             Popup::R2Creds(_) => Kind::R2Creds,
             Popup::Presign(_) => Kind::Presign,
+            Popup::CorsEdit(_) => Kind::CorsEdit,
+            Popup::ChooseDomain(_) => Kind::ChooseDomain,
             // El visor de imagen se cierra con cualquier tecla, como Help.
             Popup::ImageView(_) => Kind::Help,
             Popup::Message(_) => Kind::Message,
@@ -1149,6 +1158,61 @@ impl App {
                 }
                 None
             }
+            Kind::Rename => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::Rename(r)) if r.submitting) {
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    let (old_key, name) = match self.popup.as_ref() {
+                        Some(Popup::Rename(r)) => (r.old_key.clone(), r.name.value().trim().to_string()),
+                        _ => return None,
+                    };
+                    if name.is_empty() {
+                        if let Some(Popup::Rename(r)) = self.popup.as_mut() {
+                            r.error = Some("El nombre es obligatorio".into());
+                        }
+                        return None;
+                    }
+                    let prefix = match old_key.rfind('/') {
+                        Some(i) => &old_key[..=i],
+                        None => "",
+                    };
+                    let new_key = format!("{prefix}{name}");
+                    if new_key == old_key {
+                        self.popup = None;
+                        return None;
+                    }
+                    if self.r2.key_exists(&new_key) {
+                        if let Some(Popup::Rename(r)) = self.popup.as_mut() {
+                            r.error = Some("Ya existe un objeto con ese nombre".into());
+                        }
+                        return None;
+                    }
+                    let content_type = self
+                        .r2
+                        .selected_file()
+                        .filter(|f| f.key == old_key)
+                        .and_then(|f| f.http_metadata.as_ref())
+                        .and_then(|m| m.content_type.clone());
+                    if let Some(Popup::Rename(r)) = self.popup.as_mut() {
+                        r.error = None;
+                        r.submitting = true;
+                    }
+                    return Some(Action::RenameObject {
+                        old_key,
+                        new_key,
+                        content_type,
+                    });
+                }
+                if let Some(Popup::Rename(r)) = self.popup.as_mut() {
+                    edit_input(&mut r.name, key.code);
+                }
+                None
+            }
             Kind::R2Creds => {
                 if key.code == KeyCode::Esc {
                     self.popup = None;
@@ -1222,6 +1286,87 @@ impl App {
                 }
                 if let Some(Popup::Presign(p)) = self.popup.as_mut() {
                     edit_input(&mut p.expires, key.code);
+                }
+                None
+            }
+            Kind::CorsEdit => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::CorsEdit(c)) if c.submitting) {
+                    return None;
+                }
+                let save = key.code == KeyCode::F(5)
+                    || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL));
+                if save {
+                    let (bucket, text) = match self.popup.as_ref() {
+                        Some(Popup::CorsEdit(c)) => (c.bucket.clone(), c.json.value().to_string()),
+                        _ => return None,
+                    };
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(v) if v.is_array() => {
+                            if let Some(Popup::CorsEdit(c)) = self.popup.as_mut() {
+                                c.error = None;
+                                c.submitting = true;
+                            }
+                            return Some(Action::SaveCors { bucket, rules: v });
+                        }
+                        Ok(_) => {
+                            if let Some(Popup::CorsEdit(c)) = self.popup.as_mut() {
+                                c.error = Some("Debe ser un array JSON de reglas".into());
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(Popup::CorsEdit(c)) = self.popup.as_mut() {
+                                c.error = Some(format!("JSON inválido: {e}"));
+                            }
+                        }
+                    }
+                    return None;
+                }
+                if let Some(Popup::CorsEdit(c)) = self.popup.as_mut() {
+                    match key.code {
+                        KeyCode::Enter => c.json.insert('\n'),
+                        KeyCode::Backspace => c.json.backspace(),
+                        KeyCode::Delete => c.json.delete(),
+                        KeyCode::Left => c.json.left(),
+                        KeyCode::Right => c.json.right(),
+                        KeyCode::Up => c.json.up(),
+                        KeyCode::Down => c.json.down(),
+                        KeyCode::Home => c.json.home(),
+                        KeyCode::End => c.json.end(),
+                        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            c.json.insert(ch)
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Kind::ChooseDomain => {
+                match key.code {
+                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if let Some(Popup::ChooseDomain(c)) = self.popup.as_mut() {
+                            c.move_by(-1);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(Popup::ChooseDomain(c)) = self.popup.as_mut() {
+                            c.move_by(1);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(Popup::ChooseDomain(c)) = self.popup.as_ref()
+                            && let Some(choice) = c.selected()
+                        {
+                            let url = crate::api::r2::object_url(&choice.domain, &c.key);
+                            self.popup = None;
+                            self.open_url_in_browser(url);
+                        }
+                    }
+                    _ => {}
                 }
                 None
             }
@@ -1722,9 +1867,14 @@ impl App {
             Action::R2ObjectsError(e) => self.r2.set_objects_error(e),
             Action::UploadObject { path } => self.spawn_upload(path),
             Action::DeleteObject { key } => self.spawn_delete_object(key),
+            Action::RenameObject {
+                old_key,
+                new_key,
+                content_type,
+            } => self.spawn_rename_object(old_key, new_key, content_type),
             Action::ObjectMutated(msg) => {
                 self.status = msg;
-                if matches!(self.popup, Some(Popup::Upload(_))) {
+                if matches!(self.popup, Some(Popup::Upload(_)) | Some(Popup::Rename(_))) {
                     self.popup = None;
                 }
                 self.load_objects();
@@ -1738,6 +1888,9 @@ impl App {
                 if let Some(Popup::Upload(u)) = self.popup.as_mut() {
                     u.submitting = false;
                     u.error = Some(e);
+                } else if let Some(Popup::Rename(r)) = self.popup.as_mut() {
+                    r.submitting = false;
+                    r.error = Some(e);
                 } else {
                     self.status = format!("Error: {e}");
                 }
@@ -1768,6 +1921,24 @@ impl App {
                         self.status.clear();
                     }
                     Err(e) => self.status = format!("Preview: {e}"),
+                }
+            }
+            Action::SaveCors { bucket, rules } => self.spawn_save_cors(bucket, rules),
+            Action::CorsMutated(msg) => {
+                self.status = msg;
+                if matches!(self.popup, Some(Popup::CorsEdit(_))) {
+                    self.popup = None;
+                }
+                if let Some(name) = self.r2.selected_name() {
+                    self.load_bucket_info(name);
+                }
+            }
+            Action::CorsError(e) => {
+                if let Some(Popup::CorsEdit(c)) = self.popup.as_mut() {
+                    c.submitting = false;
+                    c.error = Some(e);
+                } else {
+                    self.status = format!("Error: {e}");
                 }
             }
         }
@@ -3079,6 +3250,56 @@ impl App {
         });
     }
 
+    /// `e`: abre el formulario de renombrar (pre-rellenado con el nombre actual).
+    fn open_rename(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        self.popup = Some(Popup::Rename(RenameForm {
+            old_key: file.key.clone(),
+            name: TextInput::new(file.filename().to_string()),
+            error: None,
+            submitting: false,
+        }));
+    }
+
+    /// Renombrar = descargar + subir con la nueva clave + borrar la vieja
+    /// (el API de R2 no ofrece copia server-side por este endpoint).
+    fn spawn_rename_object(&mut self, old_key: String, new_key: String, content_type: Option<String>) {
+        let (Some(client), Some(account_id), Some(bucket)) = (
+            self.client(),
+            self.active_account_id().map(String::from),
+            self.r2.selected_name(),
+        ) else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Renombrando…".into();
+        tokio::spawn(async move {
+            let result: color_eyre::eyre::Result<()> = async {
+                let bytes = client.get_object(&account_id, &bucket, &old_key).await?;
+                let ct = content_type.unwrap_or_else(|| {
+                    mime_guess::from_path(&new_key)
+                        .first_or_octet_stream()
+                        .essence_str()
+                        .to_string()
+                });
+                client
+                    .put_object(&account_id, &bucket, &new_key, bytes, &ct)
+                    .await?;
+                client.delete_object(&account_id, &bucket, &old_key).await?;
+                Ok(())
+            }
+            .await;
+            let action = match result {
+                Ok(()) => Action::ObjectMutated(format!("Renombrado a {new_key}")),
+                Err(e) => Action::ObjectError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
     /// `p`: URL prefirmada. Si no hay credenciales R2 guardadas, las pide antes.
     fn open_presign(&mut self) {
         let Some(file) = self.r2.selected_file() else {
@@ -3099,6 +3320,88 @@ impl App {
                 self.popup = Some(Popup::R2Creds(R2CredsForm::default()));
             }
         }
+    }
+
+    /// Abre `url` con la aplicación por defecto del sistema (detached: no
+    /// bloquea la TUI ni hereda su terminal).
+    fn open_url_in_browser(&mut self, url: String) {
+        match open::that_detached(&url) {
+            Ok(()) => self.status = format!("Abierto en el navegador: {url}"),
+            Err(e) => self.status = format!("No se pudo abrir el navegador: {e}"),
+        }
+    }
+
+    /// `o`: abre el objeto seleccionado con el dominio público/personalizado
+    /// del bucket. Sin fricción si solo hay un candidato; si hay varios,
+    /// deja elegir con un popup.
+    fn open_object_browser(&mut self) {
+        let Some(file) = self.r2.selected_file() else {
+            self.status = "Selecciona un archivo".into();
+            return;
+        };
+        let key = file.key.clone();
+        let Some(info) = self.r2.info() else {
+            self.status = "Info del bucket no disponible todavía".into();
+            return;
+        };
+        let mut choices = Vec::new();
+        if info.public.enabled && !info.public.domain.is_empty() {
+            choices.push(DomainChoice {
+                label: format!("Público (r2.dev): {}", info.public.domain),
+                domain: info.public.domain.clone(),
+            });
+        }
+        for d in info.domains.iter().filter(|d| d.enabled) {
+            choices.push(DomainChoice {
+                label: format!("Personalizado: {}", d.domain),
+                domain: d.domain.clone(),
+            });
+        }
+        match choices.len() {
+            0 => {
+                self.status = "Sin dominio público ni personalizado en este bucket".into();
+            }
+            1 => {
+                let url = crate::api::r2::object_url(&choices[0].domain, &key);
+                self.open_url_in_browser(url);
+            }
+            _ => {
+                self.popup = Some(Popup::ChooseDomain(ChooseDomain::new(key, choices)));
+            }
+        }
+    }
+
+    /// `c` (en Buckets): abre el editor de la política CORS del bucket actual.
+    fn open_cors_edit(&mut self) {
+        let (Some(bucket), Some(info)) = (self.r2.selected_name(), self.r2.info()) else {
+            self.status = "Selecciona un bucket (con info cargada)".into();
+            return;
+        };
+        let json = serde_json::to_string_pretty(&serde_json::Value::Array(info.cors_rules.clone()))
+            .unwrap_or_else(|_| "[]".into());
+        self.popup = Some(Popup::CorsEdit(CorsEditForm {
+            bucket,
+            json: TextInput::new(json),
+            error: None,
+            submitting: false,
+        }));
+    }
+
+    fn spawn_save_cors(&mut self, bucket: String, rules: serde_json::Value) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Guardando CORS…".into();
+        tokio::spawn(async move {
+            let action = match client.set_bucket_cors(&account_id, &bucket, rules).await {
+                Ok(()) => Action::CorsMutated("CORS actualizado".into()),
+                Err(e) => Action::CorsError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
     }
 
     /// Cálculo local de la URL prefirmada (SigV4); la copia vía OSC 52.
@@ -3207,18 +3510,18 @@ impl App {
         tokio::spawn(async move {
             let info = match client.bucket_detail(&account_id, &name).await {
                 Ok(detail) => {
-                    let usage = client
-                        .bucket_usage(&account_id, &name)
-                        .await
-                        .unwrap_or_default();
-                    let domains = client
-                        .bucket_domains(&account_id, &name)
-                        .await
-                        .unwrap_or_default();
+                    let (usage, domains, public, cors) = tokio::join!(
+                        client.bucket_usage(&account_id, &name),
+                        client.bucket_domains(&account_id, &name),
+                        client.bucket_public_domain(&account_id, &name),
+                        client.bucket_cors(&account_id, &name),
+                    );
                     Some(Box::new(BucketInfo {
                         detail,
-                        usage,
-                        domains,
+                        usage: usage.unwrap_or_default(),
+                        domains: domains.unwrap_or_default(),
+                        public: public.unwrap_or_default(),
+                        cors_rules: cors.unwrap_or_default(),
                     }))
                 }
                 Err(e) => {
@@ -3422,6 +3725,7 @@ impl App {
                     ("↑ ↓ / k j", "navegar buckets (uso/dominios)"),
                     ("n", "nuevo bucket"),
                     ("d", "borrar bucket (con confirmación)"),
+                    ("c", "editar política CORS (JSON)"),
                     ("r", "recargar buckets"),
                 ],
             ),
@@ -3433,6 +3737,8 @@ impl App {
                     ("Backspace / h", "subir un nivel"),
                     ("u", "subir un archivo local"),
                     ("d", "descargar a ~/Descargas y abrir"),
+                    ("o", "abrir en el navegador (dominio público/personalizado)"),
+                    ("e", "renombrar objeto"),
                     ("p", "URL prefirmada (pide credenciales R2 una vez)"),
                     ("v", "previsualizar imagen en el terminal"),
                     ("x", "borrar objeto (con confirmación)"),
@@ -3602,9 +3908,12 @@ impl App {
                 Focus::D1Results => {
                     "↑↓←→ celda · Enter ver · y copiar · Y fila · PgUp/Dn · Tab →".into()
                 }
-                Focus::R2Buckets => "↑↓ bucket · n nuevo · d borrar · Tab → objetos · ?".into(),
+                Focus::R2Buckets => {
+                    "↑↓ bucket · n nuevo · d borrar · c CORS · Tab → objetos · ?".into()
+                }
                 Focus::R2Objects => {
-                    "Enter abrir · u subir · d descargar · p URL · v ver · x borrar · ?".into()
+                    "Enter abrir · u subir · d descargar · e renombrar · o navegador · x borrar"
+                        .into()
                 }
             }
         };

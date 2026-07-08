@@ -11,15 +11,17 @@ use ratatui::Frame;
 
 use crate::api::r2::ObjectList;
 use crate::components::workers::Loadable;
-use crate::model::{R2Bucket, R2Object, R2Usage};
+use crate::model::{CustomDomain, PublicDomain, R2Bucket, R2Object, R2Usage};
 use crate::ui::theme;
 
-/// Detalle + uso + dominios de un bucket (se cargan juntos).
+/// Detalle + uso + dominios + CORS de un bucket (se cargan juntos).
 #[derive(Debug, Clone)]
 pub struct BucketInfo {
     pub detail: R2Bucket,
     pub usage: R2Usage,
-    pub domains: Vec<String>,
+    pub domains: Vec<CustomDomain>,
+    pub public: PublicDomain,
+    pub cors_rules: Vec<serde_json::Value>,
 }
 
 /// Fila del navegador de objetos.
@@ -106,6 +108,14 @@ impl R2View {
         self.info = info.map_or(Loadable::Failed, Loadable::Ready);
     }
 
+    /// Info del bucket actual, solo si terminó de cargar con éxito.
+    pub fn info(&self) -> Option<&BucketInfo> {
+        match &self.info {
+            Loadable::Ready(info) => Some(info),
+            _ => None,
+        }
+    }
+
     // --- Navegador de objetos ---
 
     /// Limpia el navegador (al cambiar de bucket/cuenta).
@@ -147,6 +157,14 @@ impl R2View {
 
     pub fn selected_entry(&self) -> Option<&Entry> {
         self.obj_state.selected().and_then(|i| self.entries.get(i))
+    }
+
+    /// `true` si ya hay un archivo listado con esa clave exacta (evita
+    /// sobrescribir en silencio al renombrar).
+    pub fn key_exists(&self, key: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|e| matches!(e, Entry::File(o) if o.key == key))
     }
 
     /// Archivo seleccionado (si la fila actual es un archivo).
@@ -333,13 +351,42 @@ fn info_lines(info: &BucketInfo) -> Vec<Line<'static>> {
         kv("Objetos", &u.objects().to_string()),
         kv("Tamaño", &human_size(u.payload())),
         kv("Metadatos", &human_size(u.metadata())),
+        Line::from(""),
     ];
+
+    // Dominio público (r2.dev): existe aunque esté deshabilitado.
+    let (pub_text, pub_color) = if info.public.domain.is_empty() {
+        ("no disponible".to_string(), theme::DIM)
+    } else if info.public.enabled {
+        (format!("https://{}", info.public.domain), theme::OK)
+    } else {
+        (format!("{} (deshabilitado)", info.public.domain), theme::DIM)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<11}", "Público"), Style::default().fg(theme::DIM)),
+        Span::styled(pub_text, Style::default().fg(pub_color)),
+    ]));
+
+    // CORS: solo el conteo (se edita con 'c' sobre el bucket).
+    let cors_text = if info.cors_rules.is_empty() {
+        "sin configurar".to_string()
+    } else {
+        format!("{} regla(s)", info.cors_rules.len())
+    };
+    lines.push(kv("CORS", &cors_text));
+
     if !info.domains.is_empty() {
         lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Dominios:", theme::title(false))));
         for dom in &info.domains {
+            let (text, color) = if dom.enabled {
+                (dom.domain.clone(), theme::FG)
+            } else {
+                (format!("{} (deshabilitado)", dom.domain), theme::DIM)
+            };
             lines.push(Line::from(vec![
                 Span::styled("• ", Style::default().fg(theme::ACCENT)),
-                Span::styled(dom.clone(), Style::default().fg(theme::FG)),
+                Span::styled(text, Style::default().fg(color)),
             ]));
         }
     }
