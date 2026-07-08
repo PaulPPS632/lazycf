@@ -3135,9 +3135,10 @@ impl App {
                     return;
                 }
             };
-            // Filtro vacío = todos los eventos (protocolo trace-v1).
+            // Mensaje de apertura del protocolo trace-v1 (como wrangler);
+            // los filtros ya fueron en el POST de creación.
             let _ = ws
-                .send(Message::Text("{\"filters\":[]}".into()))
+                .send(Message::Text("{\"debug\":false}".into()))
                 .await;
             let _ = tx.send(Action::TailStarted {
                 script: script.clone(),
@@ -3147,8 +3148,17 @@ impl App {
                 tokio::select! {
                     _ = &mut stop_rx => break,
                     msg = ws.next() => match msg {
+                        // El servidor puede emitir los eventos como frame de
+                        // texto o binario (JSON en ambos casos).
                         Some(Ok(Message::Text(t))) => {
                             let lines = crate::api::workers::parse_tail(t.as_str());
+                            if !lines.is_empty() {
+                                let _ = tx.send(Action::TailLines { script: script.clone(), lines });
+                            }
+                        }
+                        Some(Ok(Message::Binary(b))) => {
+                            let raw = String::from_utf8_lossy(&b);
+                            let lines = crate::api::workers::parse_tail(&raw);
                             if !lines.is_empty() {
                                 let _ = tx.send(Action::TailLines { script: script.clone(), lines });
                             }

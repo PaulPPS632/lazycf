@@ -204,10 +204,11 @@ impl CfClient {
             #[serde(default)]
             url: String,
         }
+        // Los filtros van en el body del POST (como wrangler); vacío = todo.
         let t: TailInfo = self
             .post(
                 &format!("/accounts/{account_id}/workers/scripts/{script}/tails"),
-                &json!({}),
+                &json!({ "filters": [] }),
             )
             .await?;
         Ok((t.id, t.url))
@@ -269,6 +270,7 @@ pub fn parse_tail(raw: &str) -> Vec<String> {
     }
 
     let Ok(ev) = serde_json::from_str::<Ev>(raw) else {
+        tracing::debug!("mensaje de tail no reconocido: {raw}");
         return Vec::new();
     };
     let hhmmss = |ms: Option<i64>| {
