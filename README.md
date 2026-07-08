@@ -68,7 +68,7 @@ si falta uno, ese módulo devuelve `403` pero el resto sigue funcionando.
 | **Workers R2 Storage** · Edit | Módulo R2: buckets, uso, objetos (subir/descargar/borrar/renombrar), CORS y dominios. |
 | **Queues** · Edit | Módulo Queues: listar/crear/borrar colas, consumidores, publicar y purgar mensajes. |
 | **Cloudflare Tunnel** · Edit | Módulo Túneles (Zero Trust): listar, crear, editar ingress, limpiar conexiones y borrar túneles. |
-| **Account Analytics** · Read | Métricas 24h de Workers (sparkline) vía GraphQL. |
+| **Account Analytics** · Read | Métricas 24h de Workers y Queues (sparklines) vía GraphQL. |
 
 #### A nivel de zona (*Zone*)
 
@@ -76,6 +76,7 @@ si falta uno, ese módulo devuelve `403` pero el resto sigue funcionando.
 | --- | --- |
 | **Zone** · Read | Módulo DNS: listar tus zonas/dominios (`/zones`). |
 | **DNS** · Edit | Módulo DNS: listar, crear, editar, borrar registros y toggle de proxy. |
+| **Workers Routes** · Read | Pestaña Rutas del módulo Workers: rutas de Worker por zona. |
 | **Cache Purge** · Purge | Purga de caché de una zona (`/zones/{id}/purge_cache`). |
 
 > **R2 (URLs prefirmadas / SigV4):** el explorador de objetos usa la API de Cloudflare

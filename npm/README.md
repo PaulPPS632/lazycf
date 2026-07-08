@@ -21,9 +21,39 @@ lazycf
 ```
 
 Necesitas un **API Token de Cloudflare** (nunca la Global Key): dashboard → *My Profile →
-API Tokens → Create Token*. Permisos recomendados: **Account** (Workers, D1, Queues,
-Cloudflare Tunnel, Analytics) + **Zone** (DNS, Cache Purge, Zone Read, Analytics).
+API Tokens → Create Token → Create Custom Token*.
 El token se guarda en el keyring del sistema, nunca en texto plano.
+
+## Scopes (permisos) del token
+
+Cada módulo de lazycf mapea a un permiso del token. Agrega solo los que uses;
+si falta uno, ese módulo devuelve `403` pero el resto sigue funcionando.
+
+### A nivel de cuenta (*Account*)
+
+| Scope | Por qué |
+| --- | --- |
+| **Account Settings** · Read | Listar tus cuentas y verificar el token (`/accounts`, `/accounts/{id}/tokens/verify`) para el selector de cuenta activa. |
+| **Workers Scripts** · Edit | Módulo Workers: listar scripts, deployments, subdominio, dominios, ver/editar variables y secretos, rollback de deployments. |
+| **Workers Tail** · Read | Logs en vivo de Workers (live-tail por WebSocket). |
+| **D1** · Edit | Módulo D1: listar bases, y ejecutar SQL (incluye escrituras) en el editor. |
+| **Workers R2 Storage** · Edit | Módulo R2: buckets, uso, objetos (subir/descargar/borrar/renombrar), CORS y dominios. |
+| **Queues** · Edit | Módulo Queues: listar/crear/borrar colas, consumidores, publicar y purgar mensajes. |
+| **Cloudflare Tunnel** · Edit | Módulo Túneles (Zero Trust): listar, crear, editar ingress, limpiar conexiones y borrar túneles. |
+| **Account Analytics** · Read | Métricas 24h de Workers y Queues (sparklines) vía GraphQL. |
+
+### A nivel de zona (*Zone*)
+
+| Scope | Por qué |
+| --- | --- |
+| **Zone** · Read | Módulo DNS: listar tus zonas/dominios (`/zones`). |
+| **DNS** · Edit | Módulo DNS: listar, crear, editar, borrar registros y toggle de proxy. |
+| **Workers Routes** · Read | Pestaña Rutas del módulo Workers: rutas de Worker por zona. |
+| **Cache Purge** · Purge | Purga de caché de una zona (`/zones/{id}/purge_cache`). |
+
+> **R2 (URLs prefirmadas / SigV4):** el explorador de objetos usa la API de Cloudflare
+> (token Bearer), pero las URLs prefirmadas requieren además credenciales **S3 de R2**
+> (Access Key ID + Secret) generadas aparte en *R2 → Manage R2 API Tokens*.
 
 ## Capturas
 
@@ -45,4 +75,4 @@ Código, issues y documentación completa: [github.com/PaulPPS632/lazycf](https:
 
 ## Licencia
 
-GPL-3.0-only
+MIT
