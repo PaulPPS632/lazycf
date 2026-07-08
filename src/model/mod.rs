@@ -1,15 +1,25 @@
 //! Structs serde para las respuestas del API v4 de Cloudflare.
 //! El envelope `CfResponse<T>` es común a casi todos los endpoints REST.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+/// Algunos endpoints devuelven `null` (no solo el campo ausente) para listas
+/// vacías; `#[serde(default)]` por sí solo no cubre ese caso.
+fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::deserialize(de)?.unwrap_or_default())
+}
 
 /// Envelope estándar del API v4: `{ success, errors, messages, result, result_info }`.
 #[derive(Debug, Deserialize)]
 pub struct CfResponse<T> {
     pub success: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub errors: Vec<CfError>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     #[allow(dead_code)] // se expondrá para avisos del API (Fase 1+)
     pub messages: Vec<serde_json::Value>,
     pub result: Option<T>,
@@ -404,4 +414,178 @@ pub struct IngressRule {
     pub service: String,
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// Cola (`GET /accounts/{id}/queues`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct Queue {
+    pub queue_id: String,
+    pub queue_name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub created_on: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub modified_on: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub producers_total_count: u64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub consumers_total_count: u64,
+    /// Producers embebidos en el listado (solo para el Resumen). El API
+    /// devuelve `null` (no solo el campo ausente) cuando no hay ninguno.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub producers: Vec<QueueProducer>,
+    /// Consumers embebidos: para el Resumen y el gating de peek/logs; la
+    /// pestaña Consumers usa `GET .../consumers` (settings completos).
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub consumers: Vec<QueueConsumer>,
+    #[serde(default)]
+    pub settings: QueueSettings,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct QueueSettings {
+    #[serde(default)]
+    pub delivery_delay: Option<u64>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub delivery_paused: bool,
+    #[serde(default)]
+    pub message_retention_period: Option<u64>,
+}
+
+/// Producer embebido de una cola (`type` = "worker" | "r2_bucket").
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct QueueProducer {
+    #[serde(rename = "type", default, deserialize_with = "null_as_default")]
+    pub ptype: String,
+    /// El API usa `script` en unos endpoints y `script_name` en otros.
+    #[serde(default, alias = "script")]
+    pub script_name: Option<String>,
+    #[serde(default)]
+    pub bucket_name: Option<String>,
+}
+
+/// Consumer de una cola (`type` = "worker" | "http_pull").
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct QueueConsumer {
+    /// Puede faltar en consumers antiguos → cadena vacía.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub consumer_id: String,
+    #[serde(rename = "type", default, deserialize_with = "null_as_default")]
+    pub ctype: String,
+    #[serde(default, alias = "script")]
+    pub script_name: Option<String>,
+    #[serde(default)]
+    pub dead_letter_queue: Option<String>,
+    #[serde(default)]
+    pub settings: ConsumerSettings,
+}
+
+impl QueueConsumer {
+    pub fn is_worker(&self) -> bool {
+        self.ctype == "worker"
+    }
+
+    /// Etiqueta legible: nombre del script o "HTTP pull".
+    pub fn label(&self) -> String {
+        match &self.script_name {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => "HTTP pull".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ConsumerSettings {
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    #[serde(default)]
+    pub max_retries: Option<u64>,
+    #[serde(default)]
+    pub retry_delay: Option<u64>,
+    /// Solo consumers worker.
+    #[serde(default)]
+    pub max_concurrency: Option<u64>,
+    /// Solo consumers worker.
+    #[serde(default)]
+    pub max_wait_time_ms: Option<u64>,
+    /// Solo consumers http_pull.
+    #[serde(default)]
+    pub visibility_timeout_ms: Option<u64>,
+}
+
+/// Mensaje espiado vía `POST .../messages/pull` (peek: nunca se hace ack).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PulledMessage {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub timestamp_ms: Option<i64>,
+    #[serde(default)]
+    pub attempts: u64,
+}
+
+/// Métricas de una cola (GraphQL, últimas 24h). Espejo de `WorkerMetrics`.
+#[derive(Debug, Clone, Default)]
+pub struct QueueMetrics {
+    /// Backlog actual (último punto de la serie).
+    pub backlog_messages: u64,
+    pub backlog_bytes: u64,
+    /// Backlog medio por hora, orden cronológico (sparkline).
+    pub series_backlog: Vec<u64>,
+    /// Mensajes ingeridos (WriteMessage) por hora (sparkline).
+    pub series_written: Vec<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CfResponse, Queue};
+
+    /// El API real de Queues manda `null` explícito (no el campo ausente) en
+    /// `producers`/`consumers`/contadores/fechas/booleanos cuando están vacíos
+    /// o vienen de una cola vieja. Reproduce el bug reportado: una cola sin
+    /// producers/consumers en medio de un array más largo.
+    #[test]
+    fn queue_con_nulls_no_rompe_el_parseo() {
+        let body = r#"{
+            "success": true,
+            "errors": null,
+            "messages": null,
+            "result": [
+                {
+                    "queue_id": "aaa",
+                    "queue_name": "con-datos",
+                    "created_on": "2026-06-17T16:22:57.330165Z",
+                    "modified_on": "2026-06-17T16:22:57.330165Z",
+                    "producers_total_count": 1,
+                    "consumers_total_count": 1,
+                    "producers": [{"type": "worker", "script": "prod-script"}],
+                    "consumers": [{"type": "worker", "script": "cons-script"}],
+                    "settings": {"delivery_delay": 0, "delivery_paused": false, "message_retention_period": 345600}
+                },
+                {
+                    "queue_id": "bbb",
+                    "queue_name": "sin-datos",
+                    "created_on": null,
+                    "modified_on": null,
+                    "producers_total_count": null,
+                    "consumers_total_count": null,
+                    "producers": null,
+                    "consumers": null,
+                    "settings": {"delivery_delay": null, "delivery_paused": null, "message_retention_period": null}
+                }
+            ],
+            "result_info": null
+        }"#;
+        let parsed: CfResponse<Vec<Queue>> =
+            serde_json::from_str(body).expect("debe tolerar nulls explícitos");
+        let queues = parsed.result.expect("result presente");
+        assert_eq!(queues.len(), 2);
+        assert_eq!(queues[0].producers.len(), 1);
+        let vacia = &queues[1];
+        assert!(vacia.producers.is_empty());
+        assert!(vacia.consumers.is_empty());
+        assert_eq!(vacia.producers_total_count, 0);
+        assert!(!vacia.settings.delivery_paused);
+    }
 }

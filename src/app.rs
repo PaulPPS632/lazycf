@@ -16,11 +16,13 @@ use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, AccountRow, BindingEdit, BucketDomains, ChooseDomain, ChoosePurpose, Confirm,
-    CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection, HttpTest, ImageView, LogDetail,
-    Message, NewBucket, NewFolder, NewTunnel, Popup, PresignForm, R2CredsForm, RField, RecordForm,
-    RenameForm, RouteField, RouteForm, SearchInput, TokenEntry, UploadForm, ZoneRef,
+    AccountPicker, AccountRow, BindingEdit, BucketDomains, ChooseDomain, ChoosePurpose,
+    ConsumerEditForm, Confirm, CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection,
+    HttpTest, ImageView, LogDetail, Message, NewBucket, NewFolder, NewQueue, NewTunnel, PeekView,
+    Popup, PresignForm, R2CredsForm, RField, RecordForm, RenameForm, RouteField, RouteForm,
+    SearchInput, SendField, SendMessageForm, TokenEntry, UploadForm, ZoneRef,
 };
+use crate::components::queues::QueuesView;
 use crate::components::r2::{BucketInfo, Entry, R2View};
 use crate::components::sidebar::Sidebar;
 use crate::components::tunnels::TunnelsView;
@@ -48,6 +50,9 @@ enum Focus {
     Workers,
     /// Columna 3 de Workers (detalle con pestañas).
     WorkersDetail,
+    Queues,
+    /// Columna 3 de Queues (detalle con pestañas).
+    QueuesDetail,
     D1Dbs,
     D1Tables,
     D1Editor,
@@ -98,6 +103,12 @@ pub struct App {
     /// Señal para detener el tail activo (cierra el WS y borra la sesión).
     tail_stop: Option<tokio::sync::oneshot::Sender<()>>,
 
+    // Queues.
+    queues: QueuesView,
+    /// Script del consumer worker a tailear en cuanto `Workers` cargue
+    /// (salto desde Queues cuando la lista de scripts aún no está lista).
+    pending_tail: Option<String>,
+
     // D1.
     d1: D1View,
 
@@ -122,6 +133,8 @@ pub struct App {
     rect_tunnel_routes: Option<Rect>,
     rect_workers: Option<Rect>,
     rect_workers_detail: Option<Rect>,
+    rect_queues: Option<Rect>,
+    rect_queues_detail: Option<Rect>,
     rect_d1_dbs: Option<Rect>,
     rect_d1_tables: Option<Rect>,
     rect_d1_editor: Option<Rect>,
@@ -156,6 +169,8 @@ impl App {
             tunnels: TunnelsView::new(),
             workers: WorkersView::new(),
             tail_stop: None,
+            queues: QueuesView::new(),
+            pending_tail: None,
             d1: D1View::new(),
             r2: R2View::new(),
             pending_presign: None,
@@ -171,6 +186,8 @@ impl App {
             rect_tunnel_routes: None,
             rect_workers: None,
             rect_workers_detail: None,
+            rect_queues: None,
+            rect_queues_detail: None,
             rect_d1_dbs: None,
             rect_d1_tables: None,
             rect_d1_editor: None,
@@ -411,6 +428,31 @@ impl App {
             }
             return;
         }
+        if let Some(r) = self.rect_queues
+            && r.contains(pos)
+        {
+            self.focus = Focus::Queues;
+            let rel = pos.y.saturating_sub(r.y + 1) as usize;
+            if self.queues.queue_at(rel) {
+                self.queues.reset_tabs();
+                self.load_active_queue_tab();
+            }
+            return;
+        }
+        if let Some(r) = self.rect_queues_detail
+            && r.contains(pos)
+        {
+            self.focus = Focus::QueuesDetail;
+            // Borde(1)+tabs(1)+separador(1) = contenido en r.y+3 (solo la
+            // pestaña Consumers tiene filas seleccionables).
+            if self.queues.active_tab == 1 {
+                let top = r.y + 3;
+                if pos.y >= top {
+                    self.queues.consumer_at((pos.y - top) as usize);
+                }
+            }
+            return;
+        }
         if let Some(r) = self.rect_d1_dbs
             && r.contains(pos)
         {
@@ -536,6 +578,22 @@ impl App {
         {
             self.focus = Focus::WorkersDetail;
             self.workers_detail_nav(delta);
+            return;
+        }
+        if let Some(r) = self.rect_queues
+            && r.contains(pos)
+        {
+            self.focus = Focus::Queues;
+            self.change_queue(delta);
+            return;
+        }
+        if let Some(r) = self.rect_queues_detail
+            && r.contains(pos)
+        {
+            self.focus = Focus::QueuesDetail;
+            if self.queues.active_tab == 1 {
+                self.queues.select_consumer(delta);
+            }
             return;
         }
         if let Some(r) = self.rect_d1_dbs
@@ -702,6 +760,65 @@ impl App {
                     self.workers.apply_log_filter(); // live
                 }
             },
+            // Columna 2: lista de colas. ↑↓ cambia de cola; Tab → detalle.
+            Focus::Queues => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.change_queue(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.change_queue(1),
+                KeyCode::Left => {
+                    self.queues.cycle_tab(-1);
+                    self.load_active_queue_tab();
+                }
+                KeyCode::Right => {
+                    self.queues.cycle_tab(1);
+                    self.load_active_queue_tab();
+                }
+                KeyCode::Char(c @ '1'..='3') => {
+                    self.queues.set_tab(c as usize - '1' as usize);
+                    self.load_active_queue_tab();
+                }
+                KeyCode::Char('n') => self.open_new_queue(),
+                KeyCode::Char('d') => self.confirm_delete_queue(),
+                KeyCode::Char('s') => self.open_send_message(),
+                KeyCode::Char('p') => self.confirm_pause_toggle(),
+                KeyCode::Char('P') => self.confirm_purge_queue(),
+                KeyCode::Char('m') => self.open_peek(),
+                KeyCode::Char('l') => self.open_consumer_logs(),
+                KeyCode::Char('r') => self.load_queues(),
+                _ => {}
+            },
+            // Columna 3: detalle. ↑↓ navega los consumers en la pestaña 2.
+            Focus::QueuesDetail => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.queues.select_consumer(-1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.queues.select_consumer(1);
+                }
+                KeyCode::Left => {
+                    self.queues.cycle_tab(-1);
+                    self.load_active_queue_tab();
+                }
+                KeyCode::Right => {
+                    self.queues.cycle_tab(1);
+                    self.load_active_queue_tab();
+                }
+                KeyCode::Char(c @ '1'..='3') => {
+                    self.queues.set_tab(c as usize - '1' as usize);
+                    self.load_active_queue_tab();
+                }
+                KeyCode::Char('n') => self.open_new_queue(),
+                KeyCode::Char('d') => self.confirm_delete_queue(),
+                KeyCode::Char('s') => self.open_send_message(),
+                KeyCode::Char('p') => self.confirm_pause_toggle(),
+                KeyCode::Char('P') => self.confirm_purge_queue(),
+                KeyCode::Char('m') => self.open_peek(),
+                KeyCode::Char('l') => self.open_consumer_logs(),
+                KeyCode::Char('e') | KeyCode::Enter if self.queues.active_tab == 1 => {
+                    self.open_edit_consumer();
+                }
+                KeyCode::Char('r') => self.load_queues(),
+                _ => {}
+            },
             Focus::D1Dbs => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.change_db(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.change_db(1),
@@ -865,6 +982,9 @@ impl App {
             Module::Workers if self.workers.is_empty() && !self.workers.loading => {
                 self.load_workers();
             }
+            Module::Queues if self.queues.is_empty() && !self.queues.loading => {
+                self.load_queues();
+            }
             Module::D1 if self.d1.is_empty() && !self.d1.loading => {
                 self.load_databases();
             }
@@ -900,6 +1020,10 @@ impl App {
             BucketDomains,
             DomainAdd,
             LogDetail,
+            NewQueue,
+            SendMessage,
+            ConsumerEdit,
+            PeekView,
             Message,
         }
         let kind = match self.popup.as_ref()? {
@@ -924,6 +1048,10 @@ impl App {
             Popup::BucketDomains(_) => Kind::BucketDomains,
             Popup::DomainAdd(_) => Kind::DomainAdd,
             Popup::LogDetail(_) => Kind::LogDetail,
+            Popup::NewQueue(_) => Kind::NewQueue,
+            Popup::SendMessage(_) => Kind::SendMessage,
+            Popup::ConsumerEdit(_) => Kind::ConsumerEdit,
+            Popup::PeekView(_) => Kind::PeekView,
             // El visor de imagen se cierra con cualquier tecla, como Help.
             Popup::ImageView(_) => Kind::Help,
             Popup::Message(_) => Kind::Message,
@@ -1743,6 +1871,209 @@ impl App {
                 }
                 None
             }
+            Kind::NewQueue => match key.code {
+                KeyCode::Esc => {
+                    self.popup = None;
+                    None
+                }
+                KeyCode::Enter => {
+                    let name = match self.popup.as_ref() {
+                        Some(Popup::NewQueue(q)) => q.name.value().trim().to_string(),
+                        _ => String::new(),
+                    };
+                    if name.is_empty() {
+                        if let Some(Popup::NewQueue(q)) = self.popup.as_mut() {
+                            q.error = Some("El nombre es obligatorio".into());
+                        }
+                        None
+                    } else {
+                        self.popup = None;
+                        Some(Action::CreateQueue(name))
+                    }
+                }
+                _ => {
+                    if let Some(Popup::NewQueue(q)) = self.popup.as_mut() {
+                        edit_input(&mut q.name, key.code);
+                    }
+                    None
+                }
+            },
+            Kind::SendMessage => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::SendMessage(f)) if f.submitting) {
+                    return None;
+                }
+                let send = key.code == KeyCode::F(5)
+                    || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL));
+                if send {
+                    let (queue_id, body, content_type, delay_text) = match self.popup.as_ref() {
+                        Some(Popup::SendMessage(f)) => (
+                            f.queue_id.clone(),
+                            f.body.value().to_string(),
+                            f.content_type().to_string(),
+                            f.delay.value().trim().to_string(),
+                        ),
+                        _ => return None,
+                    };
+                    if body.trim().is_empty() {
+                        if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
+                            f.error = Some("El cuerpo del mensaje es obligatorio".into());
+                        }
+                        return None;
+                    }
+                    if content_type == "json" && serde_json::from_str::<serde_json::Value>(&body).is_err() {
+                        if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
+                            f.error = Some("JSON inválido".into());
+                        }
+                        return None;
+                    }
+                    let delay_seconds = if delay_text.is_empty() {
+                        None
+                    } else {
+                        match delay_text.parse::<u64>() {
+                            Ok(d) => Some(d),
+                            Err(_) => {
+                                if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
+                                    f.error = Some("Delay debe ser un número de segundos".into());
+                                }
+                                return None;
+                            }
+                        }
+                    };
+                    if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
+                        f.error = None;
+                        f.submitting = true;
+                    }
+                    return Some(Action::SendMessage {
+                        queue_id,
+                        body,
+                        content_type,
+                        delay_seconds,
+                    });
+                }
+                if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
+                    match key.code {
+                        KeyCode::Tab => f.move_field(1),
+                        KeyCode::BackTab => f.move_field(-1),
+                        KeyCode::Left if f.current() == SendField::ContentType => {
+                            f.cycle_content_type(-1)
+                        }
+                        KeyCode::Right if f.current() == SendField::ContentType => {
+                            f.cycle_content_type(1)
+                        }
+                        code if f.current() == SendField::Body => {
+                            match code {
+                                KeyCode::Enter => f.body.insert('\n'),
+                                KeyCode::Backspace => f.body.backspace(),
+                                KeyCode::Delete => f.body.delete(),
+                                KeyCode::Left => f.body.left(),
+                                KeyCode::Right => f.body.right(),
+                                KeyCode::Up => f.body.up(),
+                                KeyCode::Down => f.body.down(),
+                                KeyCode::Home => f.body.home(),
+                                KeyCode::End => f.body.end(),
+                                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    f.body.insert(ch)
+                                }
+                                _ => {}
+                            }
+                        }
+                        code if f.current() == SendField::Delay => {
+                            edit_input(&mut f.delay, code);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Kind::ConsumerEdit => {
+                if key.code == KeyCode::Esc {
+                    self.popup = None;
+                    return None;
+                }
+                if matches!(self.popup.as_ref(), Some(Popup::ConsumerEdit(f)) if f.submitting) {
+                    return None;
+                }
+                if key.code == KeyCode::Enter {
+                    let (queue_id, consumer_id, body) = match self.popup.as_ref() {
+                        Some(Popup::ConsumerEdit(f)) => match f.to_body() {
+                            Ok(b) => (f.queue_id.clone(), f.consumer_id.clone(), b),
+                            Err(e) => {
+                                if let Some(Popup::ConsumerEdit(f)) = self.popup.as_mut() {
+                                    f.error = Some(e);
+                                }
+                                return None;
+                            }
+                        },
+                        _ => return None,
+                    };
+                    if let Some(Popup::ConsumerEdit(f)) = self.popup.as_mut() {
+                        f.error = None;
+                        f.submitting = true;
+                    }
+                    return Some(Action::UpdateConsumer {
+                        queue_id,
+                        consumer_id,
+                        body,
+                    });
+                }
+                if let Some(Popup::ConsumerEdit(f)) = self.popup.as_mut() {
+                    match key.code {
+                        KeyCode::Up | KeyCode::BackTab => f.move_field(-1),
+                        KeyCode::Down | KeyCode::Tab => f.move_field(1),
+                        code => edit_input(f.active_text_mut(), code),
+                    }
+                }
+                None
+            }
+            Kind::PeekView => match key.code {
+                KeyCode::Esc => {
+                    self.popup = None;
+                    None
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(Popup::PeekView(v)) = self.popup.as_mut() {
+                        v.move_by(-1);
+                    }
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(Popup::PeekView(v)) = self.popup.as_mut() {
+                        v.move_by(1);
+                    }
+                    None
+                }
+                KeyCode::Enter => {
+                    if let Some(Popup::PeekView(v)) = self.popup.as_ref()
+                        && let Some(msg) = v.selected()
+                    {
+                        let ts = msg
+                            .timestamp_ms
+                            .and_then(chrono::DateTime::from_timestamp_millis)
+                            .map(|d| d.to_rfc3339())
+                            .unwrap_or_else(|| "—".into());
+                        let lines = vec![
+                            format!("ID: {}", msg.id),
+                            format!("Timestamp: {ts}"),
+                            format!("Intentos: {}", msg.attempts),
+                            String::new(),
+                            msg.body.clone(),
+                        ];
+                        let raw = msg.body.clone();
+                        self.popup = Some(Popup::LogDetail(LogDetail {
+                            title: format!("msg {}", msg.id),
+                            lines,
+                            raw,
+                            scroll: 0,
+                        }));
+                    }
+                    None
+                }
+                _ => None,
+            },
             Kind::Help | Kind::Message => {
                 self.popup = None;
                 None
@@ -1864,6 +2195,8 @@ impl App {
                 self.tunnels.reset();
                 self.workers.reset();
                 self.workers.set_subdomain(None);
+                self.queues.reset();
+                self.pending_tail = None;
                 self.d1.reset();
                 self.r2.reset();
                 if session_changed {
@@ -1876,6 +2209,7 @@ impl App {
                 match self.sidebar.module() {
                     Module::Tunnels => self.load_tunnels(),
                     Module::Workers => self.load_workers(),
+                    Module::Queues => self.load_queues(),
                     Module::D1 => self.load_databases(),
                     Module::R2 => self.load_buckets(),
                     _ => {}
@@ -1896,6 +2230,8 @@ impl App {
                     self.dns = DnsView::new();
                     self.tunnels.reset();
                     self.workers.reset();
+                    self.queues.reset();
+                    self.pending_tail = None;
                     self.d1.reset();
                     self.r2.reset();
                     self.screen = Screen::Auth;
@@ -1914,6 +2250,8 @@ impl App {
                     self.tunnels.reset();
                     self.workers.reset();
                     self.workers.set_subdomain(None);
+                    self.queues.reset();
+                    self.pending_tail = None;
                     self.d1.reset();
                     self.r2.reset();
                     self.all_zones.clear();
@@ -1921,6 +2259,7 @@ impl App {
                     match self.sidebar.module() {
                         Module::Tunnels => self.load_tunnels(),
                         Module::Workers => self.load_workers(),
+                        Module::Queues => self.load_queues(),
                         Module::D1 => self.load_databases(),
                         Module::R2 => self.load_buckets(),
                         _ => {}
@@ -2073,6 +2412,16 @@ impl App {
 
             Action::WorkersLoaded(scripts) => {
                 self.workers.set_scripts(scripts);
+                if let Some(script) = self.pending_tail.take() {
+                    if self.workers.select_by_name(&script) {
+                        self.workers.reset_tabs();
+                        self.focus = Focus::WorkersDetail;
+                        self.dispatch(Action::StartTail(script));
+                        return;
+                    } else {
+                        self.status = format!("Worker '{script}' no está en la lista");
+                    }
+                }
                 self.load_active_tab();
             }
             Action::SubdomainLoaded(sub) => self.workers.set_subdomain(sub),
@@ -2097,6 +2446,7 @@ impl App {
             Action::WorkersError(e) => {
                 self.workers.loading = false;
                 self.workers.error = Some(e.clone());
+                self.pending_tail = None;
                 self.status = format!("Error: {e}");
             }
             Action::HttpProbe(url) => self.spawn_probe(url),
@@ -2170,6 +2520,104 @@ impl App {
                 }
             }
             Action::RollbackError(e) => self.status = format!("Rollback: {e}"),
+
+            // --- Queues (Fase 4) ---
+            Action::QueuesLoaded(qs) => {
+                self.queues.set_queues(qs);
+                self.load_active_queue_tab();
+            }
+            Action::QueueError(e) => {
+                self.queues.loading = false;
+                self.queues.error = Some(e.clone());
+                self.status = format!("Error: {e}");
+            }
+            Action::QueueMutated(msg) => {
+                self.status = msg;
+                self.load_queues();
+            }
+            Action::CreateQueue(name) => self.spawn_create_queue(name),
+            Action::DeleteQueue { queue_id } => self.spawn_delete_queue(queue_id),
+            Action::PauseQueue {
+                queue_id,
+                queue_name,
+                paused,
+            } => self.spawn_pause_queue(queue_id, queue_name, paused),
+            Action::PurgeQueue { queue_id } => self.spawn_purge_queue(queue_id),
+            Action::SendMessage {
+                queue_id,
+                body,
+                content_type,
+                delay_seconds,
+            } => self.spawn_send_message(queue_id, body, content_type, delay_seconds),
+            Action::MessageSent(msg) => {
+                self.status = msg;
+                if matches!(self.popup, Some(Popup::SendMessage(_))) {
+                    self.popup = None;
+                }
+                if self.queues.active_tab == 2
+                    && let Some(id) = self.queues.selected_id()
+                {
+                    self.load_queue_metrics(id);
+                }
+            }
+            Action::SendMessageError(e) => {
+                if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
+                    f.submitting = false;
+                    f.error = Some(e);
+                } else {
+                    self.status = format!("Error: {e}");
+                }
+            }
+            Action::ConsumersLoaded { queue_id, consumers } => {
+                if self.queues.selected_id().as_deref() == Some(queue_id.as_str()) {
+                    self.queues.set_consumers(consumers);
+                }
+            }
+            Action::UpdateConsumer {
+                queue_id,
+                consumer_id,
+                body,
+            } => self.spawn_update_consumer(queue_id, consumer_id, body),
+            Action::ConsumerSaved { queue_id, msg } => {
+                self.status = msg;
+                if matches!(self.popup, Some(Popup::ConsumerEdit(_))) {
+                    self.popup = None;
+                }
+                self.load_queue_consumers(queue_id);
+            }
+            Action::ConsumerError(e) => {
+                if let Some(Popup::ConsumerEdit(f)) = self.popup.as_mut() {
+                    f.submitting = false;
+                    f.error = Some(e);
+                } else {
+                    self.status = format!("Error: {e}");
+                }
+            }
+            Action::QueueMetricsLoaded { queue_id, metrics } => {
+                if self.queues.selected_id().as_deref() == Some(queue_id.as_str()) {
+                    self.queues.set_metrics(metrics);
+                }
+            }
+            Action::MessagesPulled { queue_id, outcome } => {
+                if self.queues.selected_id().as_deref() != Some(queue_id.as_str()) {
+                    return;
+                }
+                match outcome {
+                    Ok(messages) => {
+                        let name = self.queues.selected_name().unwrap_or_default();
+                        self.popup = Some(Popup::PeekView(PeekView::new(name, messages)));
+                    }
+                    Err(e) => {
+                        self.popup = Some(Popup::Message(Message {
+                            title: "Peek no disponible".into(),
+                            body: format!(
+                                "{e}\n\nSolo se pueden espiar mensajes de colas con consumer HTTP pull (sin consumer worker)."
+                            ),
+                            is_error: true,
+                        }));
+                    }
+                }
+            }
 
             Action::SaveBinding {
                 script,
@@ -3508,6 +3956,348 @@ impl App {
         });
     }
 
+    // --- Queues (Fase 4) ---
+
+    fn change_queue(&mut self, delta: i32) {
+        if self.queues.select(delta) {
+            self.queues.reset_tabs();
+            self.load_active_queue_tab();
+        }
+    }
+
+    /// Carga (perezosa) los datos de la pestaña activa de la cola seleccionada.
+    fn load_active_queue_tab(&mut self) {
+        let Some(queue_id) = self.queues.selected_id() else {
+            return;
+        };
+        match self.queues.active_tab {
+            1 if self.queues.consumers.is_idle() => self.load_queue_consumers(queue_id),
+            2 if self.queues.metrics.is_idle() => self.load_queue_metrics(queue_id),
+            _ => {}
+        }
+    }
+
+    fn load_queues(&mut self) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        self.queues.loading = true;
+        self.queues.error = None;
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let action = match client.list_queues(&account_id).await {
+                Ok(qs) => Action::QueuesLoaded(qs),
+                Err(e) => Action::QueueError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn load_queue_consumers(&mut self, queue_id: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        self.queues.begin_consumers();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let consumers = client.list_consumers(&account_id, &queue_id).await.ok();
+            let _ = tx.send(Action::ConsumersLoaded { queue_id, consumers });
+        });
+    }
+
+    fn load_queue_metrics(&mut self, queue_id: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        self.queues.begin_metrics();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let end = Utc::now();
+            let start = end - chrono::Duration::hours(24);
+            let start_s = start.to_rfc3339_opts(SecondsFormat::Secs, true);
+            let end_s = end.to_rfc3339_opts(SecondsFormat::Secs, true);
+            let metrics = match client
+                .queue_metrics(&account_id, &queue_id, &start_s, &end_s)
+                .await
+            {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::debug!("métricas de cola {queue_id}: {e}");
+                    None
+                }
+            };
+            let _ = tx.send(Action::QueueMetricsLoaded { queue_id, metrics });
+        });
+    }
+
+    fn open_new_queue(&mut self) {
+        self.popup = Some(Popup::NewQueue(NewQueue::default()));
+    }
+
+    fn spawn_create_queue(&mut self, name: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Creando cola…".into();
+        tokio::spawn(async move {
+            let action = match client.create_queue(&account_id, &name).await {
+                Ok(()) => Action::QueueMutated(format!("Cola '{name}' creada")),
+                Err(e) => Action::QueueError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn confirm_delete_queue(&mut self) {
+        let (Some(queue_id), Some(name)) = (self.queues.selected_id(), self.queues.selected_name())
+        else {
+            return;
+        };
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Borrar cola".into(),
+            body: format!("¿Borrar la cola '{name}'? Se perderán sus mensajes pendientes."),
+            on_yes: Action::DeleteQueue { queue_id },
+        }));
+    }
+
+    fn spawn_delete_queue(&mut self, queue_id: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Borrando cola…".into();
+        tokio::spawn(async move {
+            let action = match client.delete_queue(&account_id, &queue_id).await {
+                Ok(()) => Action::QueueMutated("Cola borrada".into()),
+                Err(e) => Action::QueueError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn confirm_pause_toggle(&mut self) {
+        let Some(q) = self.queues.selected() else {
+            return;
+        };
+        let (queue_id, queue_name, paused) =
+            (q.queue_id.clone(), q.queue_name.clone(), !q.settings.delivery_paused);
+        let (title, body) = if paused {
+            (
+                "Pausar entrega".to_string(),
+                format!(
+                    "Los consumers de '{queue_name}' dejarán de recibir mensajes; los producers siguen encolando. ¿Continuar?"
+                ),
+            )
+        } else {
+            (
+                "Reanudar entrega".to_string(),
+                format!("¿Reanudar la entrega de mensajes de '{queue_name}'?"),
+            )
+        };
+        self.popup = Some(Popup::Confirm(Confirm {
+            title,
+            body,
+            on_yes: Action::PauseQueue { queue_id, queue_name, paused },
+        }));
+    }
+
+    fn spawn_pause_queue(&mut self, queue_id: String, queue_name: String, paused: bool) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = if paused { "Pausando…".into() } else { "Reanudando…".into() };
+        tokio::spawn(async move {
+            let action = match client
+                .set_delivery_paused(&account_id, &queue_id, &queue_name, paused)
+                .await
+            {
+                Ok(()) => Action::QueueMutated(if paused {
+                    "Entrega pausada".into()
+                } else {
+                    "Entrega reanudada".into()
+                }),
+                Err(e) => Action::QueueError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn confirm_purge_queue(&mut self) {
+        let (Some(queue_id), Some(name)) = (self.queues.selected_id(), self.queues.selected_name())
+        else {
+            return;
+        };
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Purgar cola".into(),
+            body: format!("¿Borrar TODOS los mensajes de '{name}'? Esta acción es irreversible."),
+            on_yes: Action::PurgeQueue { queue_id },
+        }));
+    }
+
+    fn spawn_purge_queue(&mut self, queue_id: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Purgando…".into();
+        tokio::spawn(async move {
+            let action = match client.purge_queue(&account_id, &queue_id).await {
+                Ok(()) => Action::QueueMutated("Cola purgada".into()),
+                Err(e) => Action::QueueError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    fn open_send_message(&mut self) {
+        let (Some(queue_id), Some(queue_name)) =
+            (self.queues.selected_id(), self.queues.selected_name())
+        else {
+            return;
+        };
+        self.popup = Some(Popup::SendMessage(SendMessageForm::new(queue_id, queue_name)));
+    }
+
+    fn spawn_send_message(
+        &mut self,
+        queue_id: String,
+        body: String,
+        content_type: String,
+        delay_seconds: Option<u64>,
+    ) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let action = match client
+                .push_message(&account_id, &queue_id, &body, &content_type, delay_seconds)
+                .await
+            {
+                Ok(()) => Action::MessageSent("Mensaje enviado".into()),
+                Err(e) => Action::SendMessageError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    /// `e`/Enter en la pestaña Consumers: edita batch/retries/DLQ/etc.
+    fn open_edit_consumer(&mut self) {
+        let Some(queue_id) = self.queues.selected_id() else {
+            return;
+        };
+        let Some(c) = self.queues.selected_consumer() else {
+            self.status = "Sin consumers cargados (pulsa la pestaña Consumers)".into();
+            return;
+        };
+        if c.consumer_id.is_empty() {
+            self.status = "Este consumer no tiene id: no se puede editar".into();
+            return;
+        }
+        self.popup = Some(Popup::ConsumerEdit(ConsumerEditForm::edit(queue_id, c)));
+    }
+
+    fn spawn_update_consumer(&mut self, queue_id: String, consumer_id: String, body: serde_json::Value) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let action = match client
+                .update_consumer(&account_id, &queue_id, &consumer_id, &body)
+                .await
+            {
+                Ok(()) => Action::ConsumerSaved {
+                    queue_id,
+                    msg: "Consumer actualizado".into(),
+                },
+                Err(e) => Action::ConsumerError(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+    }
+
+    /// `m`: espía mensajes (peek, sin ack) — solo tiene sentido en colas con
+    /// consumer http_pull; si hay un consumer worker, el API lo rechaza.
+    fn open_peek(&mut self) {
+        let Some(queue_id) = self.queues.selected_id() else {
+            return;
+        };
+        if self.queues.effective_consumers().iter().any(|c| c.is_worker()) {
+            self.status =
+                "Esta cola tiene un consumer worker: no se pueden espiar mensajes (usa 'l' para ver logs)"
+                    .into();
+            return;
+        }
+        self.spawn_pull_messages(queue_id);
+    }
+
+    fn spawn_pull_messages(&mut self, queue_id: String) {
+        let (Some(client), Some(account_id)) =
+            (self.client(), self.active_account_id().map(String::from))
+        else {
+            return;
+        };
+        let tx = self.action_tx.clone();
+        self.status = "Espiando mensajes…".into();
+        tokio::spawn(async move {
+            let outcome = client
+                .pull_messages(&account_id, &queue_id, 20, 30_000)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Action::MessagesPulled { queue_id, outcome });
+        });
+    }
+
+    /// `l`: salta al módulo Workers con el consumer worker de la cola
+    /// tailando en vivo (reusa toda la infra de logs de Workers).
+    fn open_consumer_logs(&mut self) {
+        match self.queues.consumer_script() {
+            Some(script) => self.jump_to_consumer_logs(script),
+            None => self.status = "Esta cola no tiene consumer Worker".into(),
+        }
+    }
+
+    fn jump_to_consumer_logs(&mut self, script: String) {
+        self.sidebar.set_module(Module::Workers);
+        if self.workers.is_empty() {
+            self.pending_tail = Some(script);
+            self.focus = Focus::Workers;
+            if !self.workers.loading {
+                self.load_workers();
+            }
+            self.status = "Cargando workers para el tail…".into();
+            return;
+        }
+        if self.workers.select_by_name(&script) {
+            self.workers.reset_tabs();
+            self.focus = Focus::WorkersDetail;
+            self.dispatch(Action::StartTail(script));
+        } else {
+            self.status = format!("Worker '{script}' no está en la lista");
+        }
+    }
+
     // --- D1 ---
 
     fn change_db(&mut self, delta: i32) {
@@ -4647,6 +5437,8 @@ impl App {
             &[Focus::Modules, Focus::Tunnels, Focus::TunnelRoutes];
         static WORKER_PANES: &[Focus] =
             &[Focus::Modules, Focus::Workers, Focus::WorkersDetail];
+        static QUEUE_PANES: &[Focus] =
+            &[Focus::Modules, Focus::Queues, Focus::QueuesDetail];
         static D1_PANES: &[Focus] = &[
             Focus::Modules,
             Focus::D1Dbs,
@@ -4663,14 +5455,13 @@ impl App {
             Focus::R2Filter,
             Focus::R2Objects,
         ];
-        static BASE_PANES: &[Focus] = &[Focus::Modules];
         match self.sidebar.module() {
             Module::Dns => DNS_PANES,
             Module::Tunnels => TUNNEL_PANES,
             Module::Workers => WORKER_PANES,
+            Module::Queues => QUEUE_PANES,
             Module::D1 => D1_PANES,
             Module::R2 => R2_PANES,
-            _ => BASE_PANES,
         }
     }
 
@@ -4766,6 +5557,33 @@ impl App {
                     ("End", "seguir el final del tail (Logs)"),
                     ("t", "probar una ruta (GET)"),
                     ("r", "recargar workers"),
+                ],
+            ),
+            Focus::Queues => HelpSection::new(
+                "Queues (lista)",
+                vec![
+                    ("↑ ↓ / k j", "cambiar de cola"),
+                    ("Tab", "ir al detalle (columna 3)"),
+                    ("1-3 / ←→", "pestaña (resumen/consumers/métricas)"),
+                    ("n / d", "nueva cola / borrar (con confirmación)"),
+                    ("s", "enviar mensaje"),
+                    ("p / P", "pausar-reanudar entrega / purgar mensajes"),
+                    ("m", "espiar mensajes (peek, solo http_pull)"),
+                    ("l", "logs en vivo del consumer (salta a Workers)"),
+                    ("r", "recargar colas"),
+                ],
+            ),
+            Focus::QueuesDetail => HelpSection::new(
+                "Queues (detalle)",
+                vec![
+                    ("1-3 / ←→", "pestaña (resumen/consumers/métricas)"),
+                    ("↑ ↓ / k j", "navegar consumers (pestaña Consumers)"),
+                    ("e / Enter", "editar consumer (batch/retries/DLQ)"),
+                    ("s", "enviar mensaje"),
+                    ("p / P", "pausar-reanudar entrega / purgar mensajes"),
+                    ("m", "espiar mensajes (peek, solo http_pull)"),
+                    ("l", "logs en vivo del consumer (salta a Workers)"),
+                    ("r", "recargar colas"),
                 ],
             ),
             Focus::D1Dbs => HelpSection::new(
@@ -4882,6 +5700,8 @@ impl App {
         self.rect_tunnel_routes = None;
         self.rect_workers = None;
         self.rect_workers_detail = None;
+        self.rect_queues = None;
+        self.rect_queues_detail = None;
         self.rect_d1_dbs = None;
         self.rect_d1_tables = None;
         self.rect_d1_editor = None;
@@ -4933,6 +5753,15 @@ impl App {
                 );
                 self.rect_workers = Some(list_area);
                 self.rect_workers_detail = Some(detail_area);
+            }
+            Module::Queues if main_active => {
+                let (list_area, detail_area) = crate::components::workers::split(shell.main);
+                self.queues
+                    .draw_list(frame, list_area, self.focus == Focus::Queues);
+                self.queues
+                    .draw_detail(frame, detail_area, self.focus == Focus::QueuesDetail);
+                self.rect_queues = Some(list_area);
+                self.rect_queues_detail = Some(detail_area);
             }
             Module::D1 if main_active => {
                 let (dbs_area, tables_area, editor_area, result_area) =
@@ -5044,6 +5873,14 @@ impl App {
                     1 => "↑↓ deploy · Enter revertir · 1-5 pestaña · l logs · t · r · ?".into(),
                     3 => "↑↓ log · Enter detalle · / filtrar · E errores · y copiar · End sigue".into(),
                     _ => "↑↓ contenido · 1-5 pestaña · e editar · a secreto · l · t · ?".into(),
+                },
+                Focus::Queues => {
+                    "↑↓ cola · 1-3 pestaña · s enviar · p pausa · P purgar · m peek · l logs · ?"
+                        .into()
+                }
+                Focus::QueuesDetail => match self.queues.active_tab {
+                    1 => "↑↓ consumer · e/Enter editar · s p P m l · r · ?".into(),
+                    _ => "1-3 pestaña · s enviar · p pausa · P purgar · m peek · l logs · ?".into(),
                 },
                 Focus::D1Dbs => "↑↓ base · Tab → editor · r recargar · A · ? ayuda".into(),
                 Focus::D1Tables => "↑↓ tabla · Enter SELECT * · Tab → editor · r · ?".into(),

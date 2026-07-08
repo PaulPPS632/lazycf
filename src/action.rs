@@ -4,8 +4,9 @@
 use crate::api::r2::ObjectList;
 use crate::components::r2::BucketInfo;
 use crate::model::{
-    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, QueryOutcome, R2Bucket,
-    R2Object, Tunnel, WorkerMetrics, WorkerScript, Zone,
+    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, PulledMessage,
+    QueryOutcome, Queue, QueueConsumer, QueueMetrics, R2Bucket, R2Object, Tunnel, WorkerMetrics,
+    WorkerScript, Zone,
 };
 
 #[derive(Debug, Clone)]
@@ -192,6 +193,64 @@ pub enum Action {
     DeploymentRolledBack { script: String, msg: String },
     /// Error al revertir.
     RollbackError(String),
+
+    // --- Queues (Fase 4) ---
+    /// Colas cargadas.
+    QueuesLoaded(Vec<Queue>),
+    /// Error en una operación de Queues.
+    QueueError(String),
+    /// Mutación de cola OK: fija estado y recarga la lista.
+    QueueMutated(String),
+    /// Crear una cola con este nombre.
+    CreateQueue(String),
+    /// Borrar una cola (tras confirmación).
+    DeleteQueue { queue_id: String },
+    /// Pausar/reanudar la entrega (settings.delivery_paused). `queue_name`
+    /// viaja para el body del PATCH (algunas versiones del API lo exigen).
+    PauseQueue {
+        queue_id: String,
+        queue_name: String,
+        paused: bool,
+    },
+    /// Purgar la cola (borra TODOS los mensajes; tras confirmación).
+    PurgeQueue { queue_id: String },
+    /// Publicar un mensaje (desde el formulario).
+    SendMessage {
+        queue_id: String,
+        body: String,
+        content_type: String,
+        delay_seconds: Option<u64>,
+    },
+    /// Mensaje publicado OK: estado + cierra el formulario.
+    MessageSent(String),
+    /// Error al publicar (mantiene el formulario abierto).
+    SendMessageError(String),
+    /// Consumers cargados (`None` = error).
+    ConsumersLoaded {
+        queue_id: String,
+        consumers: Option<Vec<QueueConsumer>>,
+    },
+    /// Guardar la edición de un consumer (PUT; body con el shape del GET).
+    UpdateConsumer {
+        queue_id: String,
+        consumer_id: String,
+        body: serde_json::Value,
+    },
+    /// Consumer guardado: estado, cierra el form y recarga la pestaña.
+    ConsumerSaved { queue_id: String, msg: String },
+    /// Error al guardar el consumer (mantiene el formulario abierto).
+    ConsumerError(String),
+    /// Métricas de la cola (`None` = no disponibles).
+    QueueMetricsLoaded {
+        queue_id: String,
+        metrics: Option<QueueMetrics>,
+    },
+    /// Resultado del peek (pull sin ack). `Err` = mensaje legible del API
+    /// (p. ej. cola con consumer worker).
+    MessagesPulled {
+        queue_id: String,
+        outcome: Result<Vec<PulledMessage>, String>,
+    },
 
     // --- Workers: variables / secretos ---
     /// Guardar una variable (plain_text) o secreto (secret_text).

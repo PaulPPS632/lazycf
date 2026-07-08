@@ -65,8 +65,12 @@ impl CfClient {
 
     /// Decodifica el envelope y falla si `success == false`.
     fn check<T: DeserializeOwned>(path: &str, status: StatusCode, text: &str) -> Result<CfResponse<T>> {
-        let parsed: CfResponse<T> = serde_json::from_str(text)
-            .map_err(|e| eyre!("decodificando {path}: {e}; cuerpo: {}", truncate(text, 300)))?;
+        let parsed: CfResponse<T> = serde_json::from_str(text).map_err(|e| {
+            eyre!(
+                "decodificando {path}: {e}; contexto: {}",
+                error_context(text, e.line(), 400)
+            )
+        })?;
         if !parsed.success {
             let msg = parsed
                 .errors
@@ -271,5 +275,53 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..max])
+    }
+}
+
+/// Extracto del cuerpo alrededor de la línea donde falló el parseo (en vez de
+/// solo el principio): mucho más útil para ver qué campo llegó `null`.
+fn error_context(text: &str, line: usize, max: usize) -> String {
+    // `line` de serde_json es 1-indexado; localiza el byte donde empieza.
+    let target = line.saturating_sub(1);
+    let mut offset = 0usize;
+    for (i, l) in text.split('\n').enumerate() {
+        if i == target {
+            break;
+        }
+        offset += l.len() + 1;
+    }
+    let start = offset.saturating_sub(max / 2).min(text.len());
+    let end = (offset + max / 2).min(text.len());
+    // No cortar en medio de un carácter UTF-8 multibyte.
+    let start = (start..=offset.min(text.len())).find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    let end = (end..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < text.len() { "…" } else { "" };
+    format!("{prefix}{}{suffix}", &text[start..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_context;
+
+    #[test]
+    fn contexto_ubica_la_linea_correcta() {
+        let text = "{\n  \"a\": 1,\n  \"b\": null,\n  \"c\": 3\n}";
+        let ctx = error_context(text, 3, 400);
+        assert!(ctx.contains("\"b\": null"), "contexto: {ctx}");
+    }
+
+    #[test]
+    fn contexto_recorta_y_marca_con_puntos_suspensivos() {
+        let mut text = String::from("{\n");
+        for i in 0..200 {
+            text.push_str(&format!("  \"campo{i}\": {i},\n"));
+        }
+        text.push_str("  \"malo\": null\n}");
+        let line = text.matches('\n').count(); // línea de "malo"
+        let ctx = error_context(&text, line, 60);
+        assert!(ctx.contains("malo"), "contexto: {ctx}");
+        assert!(ctx.len() < text.len(), "debe recortar el cuerpo completo");
+        assert!(ctx.starts_with('…'), "debe marcar el corte inicial: {ctx}");
     }
 }

@@ -7,6 +7,7 @@ pub mod detail;
 pub mod dns;
 pub mod input;
 pub mod popup;
+pub mod queues;
 pub mod r2;
 pub mod sidebar;
 pub mod tunnels;
@@ -77,7 +78,7 @@ impl Module {
             Module::Dns => "Zonas y registros DNS · toggle de proxy · purgar caché.",
             Module::Tunnels => "Túneles Zero Trust · estado en vivo · rutas ingress.",
             Module::Workers => "Scripts · logs en vivo · métricas · testing de rutas.",
-            Module::Queues => "Backlog · Dead-Letter Queue · purgar colas.",
+            Module::Queues => "Colas · mensajes · consumers · backlog · purgar.",
             Module::D1 => "Esquema · consola SQL · backups (export/import).",
             Module::R2 => "Buckets · navegador de objetos · URLs firmadas.",
         }

@@ -128,6 +128,18 @@ impl WorkersView {
         self.selected().map(|s| s.id.clone())
     }
 
+    /// Selecciona el script por nombre (salto desde otro módulo, p. ej. Queues
+    /// hacia el tail del consumer). `true` si el script está en la lista.
+    pub fn select_by_name(&mut self, name: &str) -> bool {
+        match self.scripts.iter().position(|s| s.id == name) {
+            Some(idx) => {
+                self.state.select(Some(idx));
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn suggested_url(&self) -> Option<String> {
         match (self.selected(), &self.subdomain) {
             (Some(s), Some(sub)) => Some(format!("https://{}.{}.workers.dev", s.id, sub)),

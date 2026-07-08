@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::action::Action;
 use crate::components::input::TextInput;
-use crate::model::{Binding, CustomDomain, DnsRecord};
+use crate::model::{Binding, CustomDomain, DnsRecord, PulledMessage, QueueConsumer};
 use crate::ui::{layout, theme};
 
 /// Popup activo.
@@ -58,8 +58,238 @@ pub enum Popup {
     DomainAdd(DomainAddForm),
     /// Detalle scrollable de un evento del live-tail de Workers.
     LogDetail(LogDetail),
+    /// Entrada del nombre para crear una cola.
+    NewQueue(NewQueue),
+    /// Enviar un mensaje a una cola.
+    SendMessage(SendMessageForm),
+    /// Editar la configuración de un consumer de cola.
+    ConsumerEdit(ConsumerEditForm),
+    /// Mensajes espiados (`peek`) de una cola http_pull.
+    PeekView(PeekView),
     /// Mensaje informativo o de error.
     Message(Message),
+}
+
+/// Entrada de una sola línea (nombre de la cola).
+#[derive(Default)]
+pub struct NewQueue {
+    pub name: TextInput,
+    pub error: Option<String>,
+}
+
+/// Campos del formulario de envío de mensaje.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SendField {
+    Body,
+    ContentType,
+    Delay,
+}
+
+const CONTENT_TYPES: [&str; 2] = ["text", "json"];
+
+/// Enviar un mensaje a una cola: cuerpo (multilínea), tipo, retraso opcional.
+pub struct SendMessageForm {
+    pub queue_id: String,
+    pub queue_name: String,
+    pub body: TextInput,
+    pub content_type_idx: usize,
+    pub delay: TextInput,
+    pub field: usize,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
+impl SendMessageForm {
+    pub fn new(queue_id: String, queue_name: String) -> Self {
+        Self {
+            queue_id,
+            queue_name,
+            body: TextInput::default(),
+            content_type_idx: 0,
+            delay: TextInput::default(),
+            field: 0,
+            error: None,
+            submitting: false,
+        }
+    }
+
+    pub fn content_type(&self) -> &'static str {
+        CONTENT_TYPES[self.content_type_idx]
+    }
+
+    pub fn cycle_content_type(&mut self, delta: i32) {
+        let n = CONTENT_TYPES.len() as i32;
+        self.content_type_idx = ((((self.content_type_idx as i32 + delta) % n) + n) % n) as usize;
+    }
+
+    pub fn move_field(&mut self, delta: i32) {
+        self.field = ((((self.field as i32 + delta) % 3) + 3) % 3) as usize;
+    }
+
+    pub fn current(&self) -> SendField {
+        match self.field {
+            0 => SendField::Body,
+            1 => SendField::ContentType,
+            _ => SendField::Delay,
+        }
+    }
+}
+
+/// Campos editables de un consumer (todos como texto; los no aplicables al
+/// tipo actual se omiten en el render y se ignoran en `to_body`).
+pub struct ConsumerEditForm {
+    pub queue_id: String,
+    pub consumer_id: String,
+    pub ctype: String,
+    pub script_name: String,
+    pub batch_size: TextInput,
+    pub max_retries: TextInput,
+    pub retry_delay: TextInput,
+    pub dead_letter_queue: TextInput,
+    pub max_concurrency: TextInput,
+    pub max_wait_time_ms: TextInput,
+    pub visibility_timeout_ms: TextInput,
+    pub field: usize,
+    pub error: Option<String>,
+    pub submitting: bool,
+}
+
+impl ConsumerEditForm {
+    pub fn edit(queue_id: String, c: &QueueConsumer) -> Self {
+        let opt = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_default();
+        Self {
+            queue_id,
+            consumer_id: c.consumer_id.clone(),
+            ctype: c.ctype.clone(),
+            script_name: c.script_name.clone().unwrap_or_default(),
+            batch_size: TextInput::new(opt(c.settings.batch_size)),
+            max_retries: TextInput::new(opt(c.settings.max_retries)),
+            retry_delay: TextInput::new(opt(c.settings.retry_delay)),
+            dead_letter_queue: TextInput::new(c.dead_letter_queue.clone().unwrap_or_default()),
+            max_concurrency: TextInput::new(opt(c.settings.max_concurrency)),
+            max_wait_time_ms: TextInput::new(opt(c.settings.max_wait_time_ms)),
+            visibility_timeout_ms: TextInput::new(opt(c.settings.visibility_timeout_ms)),
+            field: 0,
+            error: None,
+            submitting: false,
+        }
+    }
+
+    pub fn is_worker(&self) -> bool {
+        self.ctype == "worker"
+    }
+
+    /// Campos visibles, en orden, según el tipo de consumer.
+    pub fn visible_fields(&self) -> Vec<usize> {
+        // 0 batch, 1 retries, 2 retry_delay, 3 DLQ, 4 concurrency, 5 wait, 6 visibility
+        if self.is_worker() {
+            vec![0, 1, 2, 3, 4, 5]
+        } else {
+            vec![0, 1, 2, 6]
+        }
+    }
+
+    pub fn move_field(&mut self, delta: i32) {
+        let n = self.visible_fields().len() as i32;
+        self.field = ((((self.field as i32 + delta) % n) + n) % n) as usize;
+    }
+
+    fn current_field(&self) -> usize {
+        let vis = self.visible_fields();
+        vis[self.field.min(vis.len() - 1)]
+    }
+
+    pub fn active_text_mut(&mut self) -> &mut TextInput {
+        match self.current_field() {
+            0 => &mut self.batch_size,
+            1 => &mut self.max_retries,
+            2 => &mut self.retry_delay,
+            3 => &mut self.dead_letter_queue,
+            4 => &mut self.max_concurrency,
+            5 => &mut self.max_wait_time_ms,
+            _ => &mut self.visibility_timeout_ms,
+        }
+    }
+
+    /// Construye el body del `PUT .../consumers/{id}`; los campos vacíos se
+    /// omiten (mantienen el valor actual del lado del API). Error si un
+    /// número no parsea.
+    pub fn to_body(&self) -> Result<serde_json::Value, String> {
+        let parse = |label: &str, t: &TextInput| -> Result<Option<u64>, String> {
+            let v = t.value().trim();
+            if v.is_empty() {
+                return Ok(None);
+            }
+            v.parse::<u64>()
+                .map(Some)
+                .map_err(|_| format!("{label}: número inválido"))
+        };
+        let mut settings = serde_json::Map::new();
+        if let Some(n) = parse("batch_size", &self.batch_size)? {
+            settings.insert("batch_size".into(), n.into());
+        }
+        if let Some(n) = parse("max_retries", &self.max_retries)? {
+            settings.insert("max_retries".into(), n.into());
+        }
+        if let Some(n) = parse("retry_delay", &self.retry_delay)? {
+            settings.insert("retry_delay".into(), n.into());
+        }
+        if self.is_worker() {
+            if let Some(n) = parse("max_concurrency", &self.max_concurrency)? {
+                settings.insert("max_concurrency".into(), n.into());
+            }
+            if let Some(n) = parse("max_wait_time_ms", &self.max_wait_time_ms)? {
+                settings.insert("max_wait_time_ms".into(), n.into());
+            }
+        } else if let Some(n) = parse("visibility_timeout_ms", &self.visibility_timeout_ms)? {
+            settings.insert("visibility_timeout_ms".into(), n.into());
+        }
+
+        let mut body = serde_json::Map::new();
+        body.insert("type".into(), self.ctype.clone().into());
+        if !self.script_name.is_empty() {
+            body.insert("script_name".into(), self.script_name.clone().into());
+        }
+        let dlq = self.dead_letter_queue.value().trim();
+        if !dlq.is_empty() {
+            body.insert("dead_letter_queue".into(), dlq.into());
+        }
+        body.insert("settings".into(), settings.into());
+        Ok(body.into())
+    }
+}
+
+/// Mensajes espiados (`peek`) de una cola http_pull.
+pub struct PeekView {
+    pub queue_name: String,
+    pub messages: Vec<PulledMessage>,
+    pub state: ListState,
+}
+
+impl PeekView {
+    pub fn new(queue_name: String, messages: Vec<PulledMessage>) -> Self {
+        let mut state = ListState::default();
+        state.select((!messages.is_empty()).then_some(0));
+        Self {
+            queue_name,
+            messages,
+            state,
+        }
+    }
+
+    pub fn move_by(&mut self, delta: i32) {
+        let len = self.messages.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.state.selected().unwrap_or(0) as i32;
+        let n = len as i32;
+        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+    }
+
+    pub fn selected(&self) -> Option<&PulledMessage> {
+        self.state.selected().and_then(|i| self.messages.get(i))
+    }
 }
 
 /// Detalle de un evento de tail (request/cf/logs/excepciones), scrollable.
@@ -770,6 +1000,10 @@ pub fn draw(frame: &mut Frame, area: Rect, popup: &mut Popup) {
         Popup::BucketDomains(d) => draw_bucket_domains(frame, area, d),
         Popup::DomainAdd(f) => draw_domain_add(frame, area, f),
         Popup::LogDetail(d) => draw_log_detail(frame, area, d),
+        Popup::NewQueue(q) => draw_new_queue(frame, area, q),
+        Popup::SendMessage(f) => draw_send_message(frame, area, f),
+        Popup::ConsumerEdit(f) => draw_consumer_edit(frame, area, f),
+        Popup::PeekView(v) => draw_peek_view(frame, area, v),
         Popup::Message(msg) => draw_message(frame, area, msg),
     }
 }
@@ -1115,6 +1349,213 @@ fn draw_new_bucket(frame: &mut Frame, area: Rect, b: &NewBucket) {
             .title_style(theme::title(true)),
     );
     frame.render_widget(body, rect);
+}
+
+fn draw_new_queue(frame: &mut Frame, area: Rect, q: &NewQueue) {
+    let rect = layout::centered(area, 56, 8);
+    frame.render_widget(Clear, rect);
+    let status: Line = match &q.error {
+        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        None => Line::from(Span::styled(
+            "Enter crear · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )),
+    };
+    let body = Paragraph::new(vec![
+        Line::from("Nombre de la nueva cola:"),
+        Line::from(""),
+        Line::from(q.name.spans(true)),
+        Line::from(""),
+        status,
+    ])
+    .block(
+        Block::bordered()
+            .title(" 📨 Nueva cola ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    );
+    frame.render_widget(body, rect);
+}
+
+fn draw_send_message(frame: &mut Frame, area: Rect, f: &SendMessageForm) {
+    let width = (area.width.saturating_mul(4) / 5).max(50);
+    let height = (area.height.saturating_mul(3) / 5).max(12);
+    let rect = layout::centered(area, width, height);
+    frame.render_widget(Clear, rect);
+
+    let block = Block::bordered()
+        .title(format!(" 📨 Enviar mensaje · {} ", f.queue_name))
+        .border_style(theme::border(true))
+        .title_style(theme::title(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let cur = f.current();
+    let rows = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Min(3),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Cuerpo del mensaje:",
+            Style::default().fg(theme::DIM),
+        ))),
+        rows[0],
+    );
+    frame.render_widget(Paragraph::new(f.body.lines(cur == SendField::Body)), rows[1]);
+
+    let ct_active = cur == SendField::ContentType;
+    let ct_style = if ct_active {
+        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::FG)
+    };
+    let ct_line = Line::from(vec![
+        Span::styled(if ct_active { "▶ " } else { "  " }, ct_style),
+        Span::styled(format!("{:<14}", "Content-Type"), Style::default().fg(theme::DIM)),
+        Span::styled(
+            if ct_active {
+                format!("‹ {} ›", f.content_type())
+            } else {
+                f.content_type().to_string()
+            },
+            ct_style,
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(ct_line), rows[2]);
+
+    let delay_active = cur == SendField::Delay;
+    let mut delay_spans = vec![
+        Span::styled(if delay_active { "▶ " } else { "  " }, Style::default().fg(theme::DIM)),
+        Span::styled(format!("{:<14}", "Delay (s)"), Style::default().fg(theme::DIM)),
+    ];
+    delay_spans.extend(f.delay.spans(delay_active));
+    frame.render_widget(Paragraph::new(Line::from(delay_spans)), rows[3]);
+
+    let hint = if f.submitting {
+        Span::styled("Enviando…", Style::default().fg(theme::ACCENT))
+    } else if let Some(e) = &f.error {
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+    } else {
+        Span::styled(
+            "Tab campo · Ctrl+Enter/F5 enviar · Esc cancelar",
+            Style::default().fg(theme::DIM),
+        )
+    };
+    frame.render_widget(Paragraph::new(Line::from(hint)), rows[4]);
+}
+
+fn draw_consumer_edit(frame: &mut Frame, area: Rect, f: &ConsumerEditForm) {
+    let vis = f.visible_fields();
+    let field_row = |label: &str, input: &TextInput, active: bool| -> Line<'static> {
+        let marker = if active { "▶ " } else { "  " };
+        let label_style = if active {
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::DIM)
+        };
+        let mut spans = vec![Span::styled(format!("{marker}{label:<22}"), label_style)];
+        spans.extend(input.spans(active));
+        Line::from(spans)
+    };
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!(
+                "Consumer: {} {}",
+                f.ctype,
+                if f.script_name.is_empty() { "—" } else { &f.script_name }
+            ),
+            Style::default().fg(theme::DIM),
+        )),
+        Line::from(""),
+    ];
+    let active_idx = vis[f.field.min(vis.len() - 1)];
+    for idx in &vis {
+        let active = *idx == active_idx;
+        let (label, input): (&str, &TextInput) = match idx {
+            0 => ("Batch size", &f.batch_size),
+            1 => ("Max retries", &f.max_retries),
+            2 => ("Retry delay (s)", &f.retry_delay),
+            3 => ("Dead-letter queue", &f.dead_letter_queue),
+            4 => ("Max concurrency", &f.max_concurrency),
+            5 => ("Max wait (ms)", &f.max_wait_time_ms),
+            _ => ("Visibility timeout (ms)", &f.visibility_timeout_ms),
+        };
+        lines.push(field_row(label, input, active));
+    }
+
+    lines.push(Line::from(""));
+    let hint = if f.submitting {
+        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+    } else if let Some(e) = &f.error {
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+    } else {
+        Span::styled(
+            "Tab campo · Enter guardar · Esc cancelar · vacío = sin cambio",
+            Style::default().fg(theme::DIM),
+        )
+    };
+    lines.push(Line::from(hint));
+
+    let height = (lines.len() as u16 + 2).clamp(10, area.height);
+    let rect = layout::centered(area, 68, height);
+    frame.render_widget(Clear, rect);
+    let body = Paragraph::new(lines).block(
+        Block::bordered()
+            .title(" ✎ Editar consumer ")
+            .border_style(theme::border(true))
+            .title_style(theme::title(true)),
+    );
+    frame.render_widget(body, rect);
+}
+
+fn draw_peek_view(frame: &mut Frame, area: Rect, v: &mut PeekView) {
+    let h = (v.messages.len() as u16 + 4).clamp(6, 18);
+    let rect = layout::centered(area, 76, h);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(format!(" 👁 Mensajes · {} ", v.queue_name))
+        .title_bottom(" Enter cuerpo completo · Esc · reaparecen tras el visibility timeout ")
+        .border_style(theme::border(true))
+        .title_style(theme::title(true));
+    if v.messages.is_empty() {
+        let body = Paragraph::new("Sin mensajes disponibles")
+            .block(block)
+            .style(Style::default().fg(theme::DIM));
+        frame.render_widget(body, rect);
+        return;
+    }
+    let items: Vec<ListItem> = v
+        .messages
+        .iter()
+        .map(|m| {
+            let ts = m
+                .timestamp_ms
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.format("%H:%M:%S").to_string())
+                .unwrap_or_default();
+            let preview: String = m.body.chars().take(60).collect();
+            let text = format!(
+                "{ts} · intento {} · {}… · {preview}",
+                m.attempts,
+                m.id.chars().take(8).collect::<String>()
+            );
+            ListItem::new(Line::from(Span::styled(text, Style::default().fg(theme::FG))))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::selection())
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, rect, &mut v.state);
 }
 
 fn draw_new_tunnel(frame: &mut Frame, area: Rect, t: &NewTunnel) {

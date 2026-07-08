@@ -4,6 +4,7 @@
 pub mod client;
 pub mod d1;
 pub mod dns;
+pub mod queues;
 pub mod r2;
 pub mod tunnels;
 pub mod workers;

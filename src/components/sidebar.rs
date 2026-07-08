@@ -44,6 +44,14 @@ impl Sidebar {
             false
         }
     }
+
+    /// Cambia el módulo activo por programa (navegación cruzada de módulos).
+    pub fn set_module(&mut self, m: Module) {
+        if let Some(idx) = Module::ALL.iter().position(|x| *x == m) {
+            self.selected = idx;
+            self.state.select(Some(idx));
+        }
+    }
 }
 
 impl Component for Sidebar {
