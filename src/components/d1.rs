@@ -38,6 +38,14 @@ pub struct Suggestion {
     pub kind: SugKind,
 }
 
+/// Sobre qué se aplica la barra WHERE: una tabla (Enter en Tablas) o la
+/// última consulta libre del editor (se envuelve como subquery).
+#[derive(Clone)]
+pub enum FilterBase {
+    Table(String),
+    Query(String),
+}
+
 /// Estado del panel de resultados.
 #[derive(Default)]
 pub enum D1Panel {
@@ -73,16 +81,22 @@ pub struct D1View {
     /// Sugerencias visibles y su selección.
     suggestions: Vec<Suggestion>,
     sug_idx: usize,
+    /// `true` si las sugerencias pertenecen a la barra WHERE (no al editor).
+    sug_where: bool,
     result: D1Panel,
+    /// Anchos por columna del resultado actual. Se calculan UNA vez en
+    /// `set_result` (recorrer todas las filas por frame trababa la rejilla
+    /// con miles de registros).
+    col_widths: Vec<usize>,
     /// Celda seleccionada en la rejilla de resultados.
     sel_row: usize,
     sel_col: usize,
     /// Desplazamiento de la rejilla (se autoajustan al renderizar).
     row_offset: usize,
     col_offset: usize,
-    /// Barra WHERE: cláusula de filtro y tabla que respalda el resultado.
+    /// Barra WHERE: cláusula de filtro y base (tabla o consulta) del resultado.
     where_input: TextInput,
-    filter_table: Option<String>,
+    filter_base: Option<FilterBase>,
 }
 
 impl D1View {
@@ -217,18 +231,76 @@ impl D1View {
         self.sug_idx = ((((self.sug_idx as i32 + delta) % n) + n) % n) as usize;
     }
 
-    /// Inserta la sugerencia seleccionada reemplazando la palabra actual.
+    /// Inserta la sugerencia seleccionada reemplazando la palabra actual
+    /// (en el editor o en la barra WHERE según a quién pertenezcan).
     pub fn accept_suggestion(&mut self) {
         if let Some(s) = self.suggestions.get(self.sug_idx) {
             let text = s.text.clone();
-            self.sql.replace_word_before_cursor(&text);
+            if self.sug_where {
+                self.where_input.replace_word_before_cursor(&text);
+            } else {
+                self.sql.replace_word_before_cursor(&text);
+            }
             self.close_suggestions();
         }
+    }
+
+    /// Sugerencias para la barra WHERE: columnas del resultado actual (o de la
+    /// tabla base) + keywords de cláusula. `forced` = Ctrl+Espacio.
+    pub fn update_where_suggestions(&mut self, forced: bool) {
+        const WHERE_KEYWORDS: &[&str] = &[
+            "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "EXISTS", "CASE",
+            "WHEN", "THEN", "ELSE", "END",
+        ];
+        self.sug_where = true;
+        let word = self.where_input.word_before_cursor();
+        if word.is_empty() && !forced {
+            self.close_suggestions();
+            return;
+        }
+        // Columnas: las del resultado en pantalla (cubren tabla, JOINs y
+        // subqueries); si aún no hay resultado, las de la tabla base.
+        let cols: Vec<String> = match (&self.result, &self.filter_base) {
+            (D1Panel::Ok { outcome, .. }, _) if !outcome.columns.is_empty() => {
+                outcome.columns.clone()
+            }
+            (_, Some(FilterBase::Table(t))) => {
+                schema_columns(&self.schema, t).cloned().unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let wl = word.to_lowercase();
+        let matches = |s: &str| wl.is_empty() || s.to_lowercase().starts_with(&wl);
+        let mut out: Vec<Suggestion> = cols
+            .iter()
+            .filter(|c| matches(c))
+            .map(|c| Suggestion {
+                text: c.clone(),
+                kind: SugKind::Column,
+            })
+            .collect();
+        out.sort_by_key(|s| s.text.to_lowercase());
+        out.extend(
+            WHERE_KEYWORDS
+                .iter()
+                .filter(|k| matches(k))
+                .map(|k| Suggestion {
+                    text: (*k).to_string(),
+                    kind: SugKind::Keyword,
+                }),
+        );
+        if out.len() == 1 && out[0].text.eq_ignore_ascii_case(&word) {
+            out.clear();
+        }
+        out.truncate(8);
+        self.suggestions = out;
+        self.sug_idx = 0;
     }
 
     /// Recalcula las sugerencias para la palabra bajo el cursor.
     /// `forced` (Ctrl+Espacio) abre el popup aunque la palabra esté vacía.
     pub fn update_suggestions(&mut self, forced: bool) {
+        self.sug_where = false;
         let word = self.sql.word_before_cursor();
 
         // "alias." → solo columnas de la tabla/subquery referenciada (vía
@@ -352,6 +424,8 @@ impl D1View {
     }
 
     pub fn set_result(&mut self, title: String, outcome: QueryOutcome) {
+        // Costo one-time: evita el escaneo O(filas × columnas) en cada frame.
+        self.col_widths = col_widths(&outcome);
         self.result = D1Panel::Ok { title, outcome };
         self.running = false;
         self.reset_cursor();
@@ -416,12 +490,12 @@ impl D1View {
         self.where_input.value().trim().to_string()
     }
 
-    pub fn filter_table(&self) -> Option<String> {
-        self.filter_table.clone()
+    pub fn filter_base(&self) -> Option<FilterBase> {
+        self.filter_base.clone()
     }
 
-    pub fn set_filter_table(&mut self, table: Option<String>) {
-        self.filter_table = table;
+    pub fn set_filter_base(&mut self, base: Option<FilterBase>) {
+        self.filter_base = base;
     }
 
     // --- Render ---
@@ -515,16 +589,17 @@ impl D1View {
 
         // Popup de autocompletado anclado bajo el cursor (estilo IDE; puede
         // solapar el panel de abajo).
-        if focused && self.suggestions_open() {
-            self.draw_suggestions(frame, rows[0]);
+        if focused && self.suggestions_open() && !self.sug_where {
+            self.draw_suggestions(frame, rows[0], &self.sql);
         }
     }
 
-    /// Overlay de sugerencias en coordenadas absolutas del frame.
-    fn draw_suggestions(&self, frame: &mut Frame, text_area: Rect) {
+    /// Overlay de sugerencias en coordenadas absolutas del frame, anclado al
+    /// cursor de `input` (el editor SQL o la barra WHERE).
+    fn draw_suggestions(&self, frame: &mut Frame, text_area: Rect, input: &TextInput) {
         let screen = frame.area();
-        let (line, col) = self.sql.line_col();
-        let word_len = self.sql.word_before_cursor().chars().count();
+        let (line, col) = input.line_col();
+        let word_len = input.word_before_cursor().chars().count();
 
         let width = self
             .suggestions
@@ -581,20 +656,25 @@ impl D1View {
         frame.render_widget(Paragraph::new(lines), rect);
     }
 
-    /// Barra WHERE: filtra los resultados de la tabla actual.
+    /// Barra WHERE: filtra los resultados de la tabla o consulta actual.
     pub fn draw_where(&self, frame: &mut Frame, area: Rect, focused: bool) {
         let block = panel(" WHERE ", focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let line = if self.filter_table.is_none() {
-            dim_line("(aplica al seleccionar una tabla)")
+        let line = if self.filter_base.is_none() {
+            dim_line("(aplica tras ejecutar una tabla o consulta)")
         } else if self.where_input.is_empty() && !focused {
             dim_line("Escribe una cláusula WHERE para filtrar · Enter aplica")
         } else {
             Line::from(self.where_input.spans(focused))
         };
         frame.render_widget(Paragraph::new(line), inner);
+
+        // Autocompletado de columnas/keywords, igual que en el editor.
+        if focused && self.suggestions_open() && self.sug_where {
+            self.draw_suggestions(frame, inner, &self.where_input);
+        }
     }
 
     pub fn draw_result(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
@@ -641,7 +721,8 @@ impl D1View {
                     return;
                 }
 
-                let w = col_widths(outcome);
+                // Anchos cacheados en `set_result` (nunca recalcular por frame).
+                let w: &[usize] = &self.col_widths;
                 let nrows = outcome.rows.len();
                 let ncols = outcome.columns.len();
 
@@ -662,15 +743,15 @@ impl D1View {
                     self.col_offset = self.sel_col;
                 }
                 let grid_w = grid_area.width as usize;
-                let mut vis_cols = fit_cols(&w, self.col_offset, grid_w);
+                let mut vis_cols = fit_cols(w, self.col_offset, grid_w);
                 while !vis_cols.contains(&self.sel_col) && self.col_offset < self.sel_col {
                     self.col_offset += 1;
-                    vis_cols = fit_cols(&w, self.col_offset, grid_w);
+                    vis_cols = fit_cols(w, self.col_offset, grid_w);
                 }
 
                 let lines = grid_lines(
                     outcome,
-                    &w,
+                    w,
                     &vis_cols,
                     self.row_offset,
                     vis_rows,

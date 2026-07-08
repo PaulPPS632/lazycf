@@ -89,6 +89,8 @@ pub struct App {
     running: bool,
     screen: Screen,
     focus: Focus,
+    /// Render bajo demanda: `true` cuando algo cambió desde el último frame.
+    dirty: bool,
     events: EventHandler,
     action_tx: UnboundedSender<Action>,
     action_rx: UnboundedReceiver<Action>,
@@ -166,6 +168,7 @@ impl App {
             running: true,
             screen: Screen::Auth,
             focus: Focus::Modules,
+            dirty: true,
             events,
             action_tx,
             action_rx,
@@ -288,11 +291,27 @@ impl App {
 
     fn handle_event(&mut self, terminal: &mut DefaultTerminal, event: Event) -> Result<()> {
         match event {
-            Event::Render | Event::Resize => {
-                terminal.draw(|frame| self.draw(frame))?;
+            // Render bajo demanda: el intervalo sigue a 60 Hz, pero solo se
+            // reconstruyen los widgets si algo cambió desde el último frame
+            // (tecla, mouse o Action). En reposo la CPU queda a ~0.
+            Event::Render => {
+                if self.dirty {
+                    terminal.draw(|frame| self.draw(frame))?;
+                    self.dirty = false;
+                }
             }
-            Event::Key(key) => self.on_key(key),
-            Event::Mouse(m) => self.on_mouse(m),
+            Event::Resize => {
+                terminal.draw(|frame| self.draw(frame))?;
+                self.dirty = false;
+            }
+            Event::Key(key) => {
+                self.dirty = true;
+                self.on_key(key);
+            }
+            Event::Mouse(m) => {
+                self.dirty = true;
+                self.on_mouse(m);
+            }
             Event::Tick => {}
         }
         Ok(())
@@ -331,7 +350,7 @@ impl App {
         if matches!(self.focus, Focus::D1Editor | Focus::D1Where) {
             match key.code {
                 // Con el popup de sugerencias abierto, Tab acepta en vez de salir.
-                KeyCode::Tab if self.focus == Focus::D1Editor && self.d1.suggestions_open() => {
+                KeyCode::Tab if self.d1.suggestions_open() => {
                     self.d1.accept_suggestion();
                 }
                 KeyCode::Tab => self.dispatch(Action::CycleFocus { back: false }),
@@ -911,10 +930,26 @@ impl App {
                 }
                 _ => {}
             },
+            // Barra WHERE: mismo autocompletado que el editor (columnas del
+            // resultado + keywords de cláusula).
             Focus::D1Where => match key.code {
+                KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.d1.update_where_suggestions(true)
+                }
+                KeyCode::Enter if self.d1.suggestions_open() => self.d1.accept_suggestion(),
+                KeyCode::Esc if self.d1.suggestions_open() => self.d1.close_suggestions(),
+                KeyCode::Up if self.d1.suggestions_open() => self.d1.sug_move(-1),
+                KeyCode::Down if self.d1.suggestions_open() => self.d1.sug_move(1),
                 KeyCode::Enter => self.apply_where_filter(),
                 KeyCode::Esc => self.focus = Focus::D1Results,
-                code => edit_input(self.d1.where_mut(), code),
+                code @ (KeyCode::Char(_) | KeyCode::Backspace) => {
+                    edit_input(self.d1.where_mut(), code);
+                    self.d1.update_where_suggestions(false);
+                }
+                code => {
+                    self.d1.close_suggestions();
+                    edit_input(self.d1.where_mut(), code);
+                }
             },
             Focus::D1Results => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.d1.move_cell(-1, 0),
@@ -2021,6 +2056,9 @@ impl App {
     // --- Despacho de acciones ---
 
     fn dispatch(&mut self, action: Action) {
+        // Toda Action puede mutar estado visible (incluye el live-tail que
+        // llega por el canal): marca el frame como sucio.
+        self.dirty = true;
         match action {
             Action::Quit => self.running = false,
             Action::CycleFocus { back } => self.cycle_focus(back),
@@ -3113,9 +3151,11 @@ impl App {
             Focus::D1Where => HelpSection::new(
                 "Filtro WHERE",
                 vec![
-                    ("(texto)", "escribe una cláusula WHERE"),
-                    ("Enter", "aplicar el filtro a la tabla"),
-                    ("Esc", "ir a los resultados"),
+                    ("(texto)", "escribe una cláusula WHERE · sugiere al teclear"),
+                    ("Ctrl+Espacio", "abrir sugerencias (columnas del resultado)"),
+                    ("Tab / Enter", "aceptar sugerencia (popup abierto)"),
+                    ("Enter", "aplicar el filtro (tabla o consulta)"),
+                    ("Esc", "cerrar sugerencias / ir a los resultados"),
                 ],
             ),
             Focus::WorkersLogFilter => HelpSection::new(
@@ -3385,7 +3425,9 @@ impl App {
                 Focus::D1Editor => {
                     "escribe SQL · Ctrl+Espacio sugerir · F5 ejecutar · Tab → · ?".into()
                 }
-                Focus::D1Where => "escribe filtro WHERE · Enter aplicar · Tab → · ?".into(),
+                Focus::D1Where => {
+                    "escribe filtro WHERE · Ctrl+Espacio sugerir · Enter aplicar · ?".into()
+                }
                 Focus::D1Results => {
                     "↑↓←→ celda · Enter ver · y copiar · Y fila · PgUp/Dn · Tab →".into()
                 }

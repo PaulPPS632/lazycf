@@ -34,9 +34,11 @@ impl App {
             self.status = "Escribe una consulta".into();
             return;
         }
-        // Consulta libre: el filtro WHERE no aplica (no hay tabla base conocida).
-        self.d1.set_filter_table(None);
-        self.spawn_d1_query(db_id, "consulta".into(), sql);
+        // La consulta libre pasa a ser la base del filtro WHERE (se envuelve
+        // como subquery al aplicar la cláusula).
+        self.d1
+            .set_filter_base(Some(crate::components::d1::FilterBase::Query(sql.clone())));
+        self.spawn_d1_query(db_id, "consulta".into(), auto_limit(&sql));
     }
 
     /// `Enter` sobre una tabla: vuelca `SELECT *` en el editor y lo ejecuta.
@@ -47,30 +49,52 @@ impl App {
         };
         let sql = format!("SELECT * FROM {} LIMIT 50", quote_ident(&table));
         self.d1.set_sql(sql.clone());
-        self.d1.set_filter_table(Some(table.clone()));
+        self.d1
+            .set_filter_base(Some(crate::components::d1::FilterBase::Table(table.clone())));
         self.spawn_d1_query(db_id, format!("{table} · SELECT * LIMIT 50"), sql);
     }
 
-    /// Reejecuta la tabla actual con la cláusula WHERE de la barra de filtro.
+    /// Reejecuta la base actual (tabla o consulta libre) con la cláusula WHERE
+    /// de la barra de filtro. Las consultas libres se envuelven como subquery.
     pub(crate) fn apply_where_filter(&mut self) {
-        let (Some(db_id), Some(table)) = (self.d1.selected_db_id(), self.d1.filter_table()) else {
-            self.status = "El filtro aplica a una tabla seleccionada".into();
+        use crate::components::d1::FilterBase;
+        let (Some(db_id), Some(base)) = (self.d1.selected_db_id(), self.d1.filter_base()) else {
+            self.status = "El filtro aplica tras ejecutar una tabla o consulta".into();
             return;
         };
         let clause = self.d1.where_trimmed();
-        let ident = quote_ident(&table);
-        let (sql, title) = if clause.is_empty() {
-            (
-                format!("SELECT * FROM {ident} LIMIT 50"),
-                format!("{table} · SELECT * LIMIT 50"),
-            )
-        } else {
-            (
-                format!("SELECT * FROM {ident} WHERE {clause} LIMIT 50"),
-                format!("{table} · WHERE {clause}"),
-            )
+        let (sql, title) = match &base {
+            FilterBase::Table(table) => {
+                let ident = quote_ident(table);
+                if clause.is_empty() {
+                    (
+                        format!("SELECT * FROM {ident} LIMIT 50"),
+                        format!("{table} · SELECT * LIMIT 50"),
+                    )
+                } else {
+                    (
+                        format!("SELECT * FROM {ident} WHERE {clause} LIMIT 50"),
+                        format!("{table} · WHERE {clause}"),
+                    )
+                }
+            }
+            FilterBase::Query(query) => {
+                // Sin los `;` finales: la consulta va dentro de un paréntesis.
+                let mut inner = query.trim_end();
+                while let Some(stripped) = inner.strip_suffix(';') {
+                    inner = stripped.trim_end();
+                }
+                if clause.is_empty() {
+                    (auto_limit(inner), "consulta".to_string())
+                } else {
+                    (
+                        auto_limit(&format!("SELECT * FROM ({inner}) WHERE {clause}")),
+                        format!("consulta · WHERE {clause}"),
+                    )
+                }
+            }
         };
-        self.d1.set_filter_table(Some(table));
+        self.d1.set_filter_base(Some(base));
         self.spawn_d1_query(db_id, title, sql);
     }
 
@@ -105,7 +129,8 @@ impl App {
             return;
         };
         let sql = format!("PRAGMA table_info({})", quote_ident(&table));
-        self.d1.set_filter_table(None);
+        // El PRAGMA no es filtrable con WHERE.
+        self.d1.set_filter_base(None);
         self.spawn_d1_query(db_id, format!("{table} · columnas"), sql);
     }
 
@@ -168,5 +193,81 @@ impl App {
                 outcome,
             });
         });
+    }
+}
+
+/// Añade `LIMIT MAX_GRID_ROWS+1` a las consultas de lectura del editor que no
+/// traen su propio LIMIT (truco N+1: si llega la fila extra, hubo truncado).
+/// INSERT/UPDATE/DELETE/PRAGMA/etc. pasan intactas.
+fn auto_limit(sql: &str) -> String {
+    let lower = sql.to_lowercase();
+    let trimmed = lower.trim_start();
+    let is_read = trimmed.starts_with("select") || trimmed.starts_with("with");
+    // Token `limit` en cualquier parte (best-effort: cubre el caso normal;
+    // un `limit` dentro de un string literal solo desactiva el auto-límite).
+    let has_limit = lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|tok| tok == "limit");
+    if is_read && !has_limit {
+        // Sin los `;` finales: `… ; LIMIT n` es un error de sintaxis en SQLite.
+        let mut base = sql.trim_end();
+        while let Some(stripped) = base.strip_suffix(';') {
+            base = stripped.trim_end();
+        }
+        format!("{base} LIMIT {}", crate::api::d1::MAX_GRID_ROWS + 1)
+    } else {
+        sql.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_limit;
+
+    #[test]
+    fn select_sin_limit_lo_recibe() {
+        let out = auto_limit("SELECT * FROM users");
+        assert!(out.ends_with("LIMIT 2001"), "{out}");
+    }
+
+    #[test]
+    fn select_con_limit_queda_intacto() {
+        let sql = "select * from users LIMIT 10";
+        assert_eq!(auto_limit(sql), sql);
+    }
+
+    #[test]
+    fn with_cte_lo_recibe() {
+        let out = auto_limit("WITH t AS (SELECT 1) SELECT * FROM t");
+        assert!(out.ends_with("LIMIT 2001"), "{out}");
+    }
+
+    #[test]
+    fn mutaciones_intactas() {
+        for sql in [
+            "INSERT INTO x VALUES (1)",
+            "update x set a = 1",
+            "DELETE FROM x",
+            "PRAGMA table_info(x)",
+        ] {
+            assert_eq!(auto_limit(sql), sql);
+        }
+    }
+
+    #[test]
+    fn limit_como_identificador_no_confunde() {
+        // Columna llamada `limits` NO es el token `limit`.
+        let out = auto_limit("SELECT limits FROM plans");
+        assert!(out.ends_with("LIMIT 2001"), "{out}");
+    }
+
+    #[test]
+    fn punto_y_coma_final_se_recorta() {
+        // `… ; LIMIT n` es error de sintaxis en SQLite (bug reportado).
+        assert_eq!(
+            auto_limit("select * from capitulo_imagen;"),
+            "select * from capitulo_imagen LIMIT 2001"
+        );
+        assert_eq!(auto_limit("select 1 ;  ; "), "select 1 LIMIT 2001");
     }
 }

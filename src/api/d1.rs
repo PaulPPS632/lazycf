@@ -8,6 +8,10 @@ use serde_json::json;
 use super::CfClient;
 use crate::model::{D1Database, QueryOutcome};
 
+/// Tope de filas que retiene la rejilla de resultados. Más allá de esto la
+/// consulta se trunca (con aviso): la TUI es para inspección, no para volcados.
+pub const MAX_GRID_ROWS: usize = 2_000;
+
 // --- Estructuras de la respuesta de `/raw` ---
 // `result` es un array (un elemento por sentencia); cada uno trae
 // `results: { columns, rows }` y `meta` con los contadores.
@@ -74,19 +78,31 @@ impl CfClient {
         let Some(r) = last else {
             return Ok(QueryOutcome::default());
         };
-        Ok(QueryOutcome {
-            columns: r.results.columns,
-            rows: r
-                .results
-                .rows
-                .into_iter()
-                .map(|row| row.iter().map(cell_to_string).collect())
-                .collect(),
-            rows_read: r.meta.rows_read,
-            rows_written: r.meta.rows_written,
-            changes: r.meta.changes,
-            duration_ms: r.meta.duration,
-        })
+        Ok(outcome_from_rows(r))
+    }
+}
+
+/// Construye el `QueryOutcome` aplicando el tope `MAX_GRID_ROWS`: se convierte
+/// como mucho una fila extra (para detectar el truncado) y las celdas se
+/// mueven (`Value::String` sin clone) en vez de clonarse.
+fn outcome_from_rows(r: RawResult) -> QueryOutcome {
+    let mut rows: Vec<Vec<String>> = r
+        .results
+        .rows
+        .into_iter()
+        .take(MAX_GRID_ROWS + 1)
+        .map(|row| row.into_iter().map(cell_to_string).collect())
+        .collect();
+    let truncated = rows.len() > MAX_GRID_ROWS;
+    rows.truncate(MAX_GRID_ROWS);
+    QueryOutcome {
+        columns: r.results.columns,
+        rows,
+        truncated,
+        rows_read: r.meta.rows_read,
+        rows_written: r.meta.rows_written,
+        changes: r.meta.changes,
+        duration_ms: r.meta.duration,
     }
 }
 
@@ -152,18 +168,52 @@ pub fn parse_create_columns(sql: &str) -> Vec<String> {
     cols
 }
 
-/// Convierte una celda JSON a texto para mostrar en la tabla.
-fn cell_to_string(v: &serde_json::Value) -> String {
+/// Convierte una celda JSON a texto para mostrar en la tabla. Consume el
+/// `Value`: los strings se mueven tal cual (sin clone por celda).
+fn cell_to_string(v: serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => String::new(),
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => s,
         other => other.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_create_columns;
+    use super::{outcome_from_rows, parse_create_columns, RawResult, RawRows, MAX_GRID_ROWS};
+
+    #[test]
+    fn resultado_enorme_se_trunca_al_tope() {
+        let r = RawResult {
+            results: RawRows {
+                columns: vec!["id".into()],
+                rows: (0..MAX_GRID_ROWS + 500)
+                    .map(|i| vec![serde_json::json!(i)])
+                    .collect(),
+            },
+            meta: Default::default(),
+            success: true,
+        };
+        let o = outcome_from_rows(r);
+        assert_eq!(o.rows.len(), MAX_GRID_ROWS);
+        assert!(o.truncated);
+        assert!(o.summary().contains("TRUNCADO"), "{}", o.summary());
+    }
+
+    #[test]
+    fn resultado_pequeno_no_se_marca_truncado() {
+        let r = RawResult {
+            results: RawRows {
+                columns: vec!["v".into()],
+                rows: vec![vec![serde_json::json!("hola")], vec![serde_json::Value::Null]],
+            },
+            meta: Default::default(),
+            success: true,
+        };
+        let o = outcome_from_rows(r);
+        assert_eq!(o.rows, vec![vec!["hola".to_string()], vec![String::new()]]);
+        assert!(!o.truncated);
+    }
 
     #[test]
     fn columnas_basicas_y_constraints() {

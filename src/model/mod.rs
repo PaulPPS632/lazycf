@@ -291,6 +291,8 @@ pub struct D1Database {
 pub struct QueryOutcome {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    /// La consulta devolvió más filas que el tope de la rejilla.
+    pub truncated: bool,
     pub rows_read: u64,
     pub rows_written: u64,
     pub changes: u64,
@@ -300,8 +302,13 @@ pub struct QueryOutcome {
 impl QueryOutcome {
     /// Resumen de una línea con los contadores de `meta`.
     pub fn summary(&self) -> String {
+        let trunc = if self.truncated {
+            " · TRUNCADO (añade LIMIT/WHERE para refinar)"
+        } else {
+            ""
+        };
         format!(
-            "{} filas · leídas {} · escritas {} · {} cambios · {:.2} ms",
+            "{} filas{trunc} · leídas {} · escritas {} · {} cambios · {:.2} ms",
             self.rows.len(),
             self.rows_read,
             self.rows_written,
