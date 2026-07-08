@@ -17,6 +17,73 @@ Módulos: **DNS/Dominios**, **Túneles** (Zero Trust), **Workers**, **Queues**, 
 Navegación estilo lazygit (paneles, atajos de teclado, sidebar de recursos), llamadas a la API
 de Cloudflare 100% async (no bloquea la UI), y soporte multi-cuenta con selector de cuenta activa.
 
+## Módulos
+
+### 🌐 DNS y Dominios
+- Zonas de la cuenta activa (izquierda) + tabla de registros de la zona seleccionada (derecha).
+- Crear y editar registros con **formulario dinámico por tipo** (A, AAAA, CNAME, TXT, MX):
+  los campos cambian según el tipo (prioridad en MX, proxy solo en proxiables, TTL con `auto`).
+- **Toggle de proxy** (nube naranja) con confirmación, borrado de registros con confirmación.
+- **Purga de caché** de la zona completa (con confirmación).
+
+### 🚇 Túneles (Zero Trust)
+- Lista de túneles `cloudflared` con **estado en vivo** (healthy / degraded / down / inactive)
+  y conexiones activas por datacenter.
+- Crear túnel (muestra el token para el connector) y borrarlo; limpiar conexiones colgadas.
+- **Rutas públicas (ingress)** estilo dashboard: "agregar aplicación publicada" con
+  subdominio + zona de la cuenta — **crea el CNAME automáticamente**. Editar servicio/ruta
+  y borrar rutas sin romper el resto del config.
+
+### ⚙ Workers
+- Lista de scripts + detalle con **5 pestañas**:
+  - **Métricas** — requests, errores, CPU p50/p99 y sparkline 24 h (GraphQL), tasa de error coloreada.
+  - **Implementaciones** — historial de deployments; **rollback** al deployment seleccionado (con confirmación).
+  - **Variables** — variables y secretos; editar valores y añadir secretos nuevos (endpoint seguro).
+  - **Logs** — **live-tail por WebSocket** (protocolo `trace-v1`): filtro en vivo (`/`),
+    solo-errores (`E`), seguir el final (`End`), Enter abre el **detalle del evento**
+    (request, headers, logs, excepciones) y `y` copia el JSON crudo.
+  - **Rutas** — rutas de Worker por zona + custom domains apuntando al script.
+- **Probar una ruta** (`t`): GET con código de estado y latencia; sugiere la URL `workers.dev`.
+
+### 📨 Queues
+- Lista de colas (⏸ marca las pausadas) + detalle con **3 pestañas**:
+  - **Resumen** — settings (delay, retención, estado de entrega), producers y consumers.
+  - **Consumers** — configuración completa; **editar** batch, retries, delay, DLQ,
+    concurrencia/wait (worker) o visibility timeout (HTTP pull).
+  - **Métricas** — backlog actual + sparklines de backlog y mensajes ingeridos (24 h, GraphQL).
+- Crear y borrar colas; **enviar mensajes** (texto o JSON, con delay opcional);
+  **pausar/reanudar** la entrega y **purgar** mensajes (todo con confirmación).
+- **Peek de mensajes** en colas HTTP pull (`m`, sin ack — reaparecen tras el visibility timeout).
+- `l` salta al módulo Workers con el **live-tail del consumer** ya arrancado.
+
+### 🗄 D1
+- Bases y tablas (vía `sqlite_master`); ↑↓ sobre una tabla muestra sus columnas (PRAGMA).
+- **Editor SQL multilínea** con **autocompletado contextual** (keywords, tablas, columnas,
+  y columnas por alias — `t.` sugiere las de esa tabla/subquery). F5 / Ctrl+Enter ejecuta.
+- **LIMIT automático** en consultas sin límite propio + tope de 2 000 filas con aviso de
+  truncado — la rejilla vuela aunque la tabla tenga 100 000 registros.
+- Resultados en **rejilla estilo hoja de cálculo**: navegación por celda, ver el valor
+  completo (Enter), copiar celda (`y`) o fila TSV (`Y`).
+- Barra **WHERE** con autocompletado (columnas del resultado): filtra la tabla actual
+  **o la última consulta libre** (se envuelve como subquery).
+
+### 📦 R2
+- Buckets (crear/borrar) + panel de **uso** (peso, nº de objetos, ubicación, clase).
+- **Navegador de objetos** por carpetas con paginación, filtro instantáneo (`/`) y
+  **búsqueda profunda** en todo el bucket (`s`).
+- Subir, descargar (a ~/Descargas), renombrar, **mover** (editando la clave), nueva carpeta,
+  metadatos (`i`), marcar múltiples (`Espacio`) y **borrado masivo** (con confirmación).
+- **Preview de imágenes en la terminal** (`v`, medias celdas RGB).
+- URLs: abrir/copiar con dominio público `r2.dev` o **dominios personalizados**
+  (conectar/quitar desde la TUI), y **URLs prefirmadas SigV4** (credenciales S3 en el keyring).
+- Editor de **política CORS** (JSON) y toggle del dominio público `r2.dev`.
+
+### Transversal
+- **Multi-cuenta y multi-token**: selector de cuenta activa (`A`), tokens en el keyring del sistema.
+- **Mouse completo**: click enfoca y selecciona, scroll navega cualquier panel.
+- Ayuda contextual (`?`) con los atajos del panel activo; barra de estado con hints.
+- Render bajo demanda: CPU ≈ 0 en reposo.
+
 ## Capturas
 
 ### 🌐 DNS y Dominios
