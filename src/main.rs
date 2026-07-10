@@ -8,6 +8,7 @@ mod components;
 mod config;
 mod event;
 mod model;
+mod oauth;
 mod secrets;
 mod tui;
 mod ui;

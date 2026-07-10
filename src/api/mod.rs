@@ -9,7 +9,7 @@ pub mod r2;
 pub mod tunnels;
 pub mod workers;
 
-pub use client::CfClient;
+pub use client::{CfClient, CredentialSource};
 
 use color_eyre::eyre::{bail, Result};
 
@@ -37,12 +37,22 @@ impl CfClient {
         self.get("/accounts").await
     }
 
-    /// Verifica el token soportando tokens user-owned y account-owned.
+    /// Verifica la credencial soportando tokens user-owned, account-owned y OAuth.
     ///
     /// Los tokens de cuenta (`cfat_`) NO validan contra `/user/tokens/verify`;
     /// hay que verificarlos contra `/accounts/{id}/tokens/verify`. Descubrimos
     /// la cuenta con `/accounts` (funciona para ambos tipos con scope de cuenta).
+    /// Los tokens OAuth tampoco validan contra `tokens/verify`: se usa
+    /// `GET /accounts` (scope `account:read`) como prueba de vida.
     pub async fn authenticate(&self) -> Result<AuthInfo> {
+        if self.source().is_oauth() {
+            let accounts = self.list_accounts().await?;
+            if accounts.is_empty() {
+                bail!("La sesión OAuth no tiene acceso a ninguna cuenta");
+            }
+            return Ok(AuthInfo { accounts });
+        }
+
         let user_ok = matches!(self.verify_user_token().await, Ok(v) if v.status == "active");
         let accounts = self.list_accounts().await.unwrap_or_default();
 

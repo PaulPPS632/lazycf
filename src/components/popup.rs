@@ -926,12 +926,19 @@ impl HelpSection {
     }
 }
 
-/// Estado del campo de entrada del token.
+/// Estado de la pantalla de autenticación. OAuth es el método por defecto;
+/// `manual = true` cambia a la entrada de API token.
 #[derive(Default)]
 pub struct TokenEntry {
     pub input: TextInput,
     pub error: Option<String>,
     pub verifying: bool,
+    /// `true` = modo API token (secundario); `false` = login OAuth (default).
+    pub manual: bool,
+    /// Flujo OAuth en vuelo: "esperando autorización en el navegador".
+    pub oauth_in_progress: bool,
+    /// URL de autorización para copiar/pegar (fallback, p. ej. sesión SSH).
+    pub oauth_url: Option<String>,
 }
 
 /// Diálogo de confirmación: `on_yes` se despacha al aceptar.
@@ -1766,8 +1773,77 @@ fn draw_help(frame: &mut Frame, area: Rect, help: &Help) {
 }
 
 fn draw_token(frame: &mut Frame, area: Rect, entry: &TokenEntry) {
-    let rect = layout::centered(area, 72, 16);
+    let rect = layout::centered(area, 72, 18);
     frame.render_widget(Clear, rect);
+
+    // Flujo OAuth en vuelo: estado de espera + URL de fallback.
+    if entry.oauth_in_progress {
+        let dim = Style::default().fg(theme::DIM);
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Esperando autorización en el navegador…",
+                Style::default().fg(theme::ACCENT),
+            )),
+            Line::from(""),
+            Line::from("Aprueba el acceso en la pestaña que se acaba de abrir."),
+            Line::from(""),
+        ];
+        if let Some(url) = &entry.oauth_url {
+            lines.push(Line::from(Span::styled(
+                "Si el navegador no se abrió, copia esta URL:",
+                dim,
+            )));
+            lines.push(Line::from(Span::styled(url.clone(), dim)));
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled("Esc cancelar", dim)));
+        let body = Paragraph::new(lines)
+            .block(
+                Block::bordered()
+                    .title(" 🔑 Login con Cloudflare (OAuth) ")
+                    .border_style(theme::border(true))
+                    .title_style(theme::title(true)),
+            )
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, rect);
+        return;
+    }
+
+    // Pantalla por defecto: login OAuth como método principal.
+    if !entry.manual {
+        let dim = Style::default().fg(theme::DIM);
+        let status: Line = if entry.verifying {
+            Line::from(Span::styled("Verificando…", Style::default().fg(theme::ACCENT)))
+        } else if let Some(err) = &entry.error {
+            Line::from(Span::styled(format!("✗ {err}"), Style::default().fg(theme::ERROR)))
+        } else {
+            Line::from(Span::styled(
+                "Enter iniciar sesión · t API token · Ctrl-C salir",
+                dim,
+            ))
+        };
+        let body = Paragraph::new(vec![
+            Line::from("Conecta lazycf con tu cuenta de Cloudflare:"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Enter  →  Iniciar sesión con Cloudflare (abre el navegador)",
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("  t      →  usar un API token en su lugar", dim)),
+            Line::from(""),
+            status,
+        ])
+        .block(
+            Block::bordered()
+                .title(" 🔑 Autenticación ")
+                .border_style(theme::border(true))
+                .title_style(theme::title(true)),
+        )
+        .wrap(Wrap { trim: true });
+        frame.render_widget(body, rect);
+        return;
+    }
 
     // Token enmascarado con cursor de bloque en su posición.
     let n = entry.input.value().chars().count();
@@ -1792,7 +1868,7 @@ fn draw_token(frame: &mut Frame, area: Rect, entry: &TokenEntry) {
         ))
     } else {
         Line::from(Span::styled(
-            "Enter verificar · Ctrl-O abrir dashboard · Ctrl-C salir",
+            "Enter verificar · Ctrl-O dashboard · Esc volver · Ctrl-C salir",
             Style::default().fg(theme::DIM),
         ))
     };

@@ -23,9 +23,19 @@ El instalador descarga el binario nativo para tu sistema (Linux x64, macOS Intel
 ```sh
 lazycf
 ```
-Necesitas un **API Token de Cloudflare** (nunca la Global Key): dashboard → *My Profile →
-API Tokens → Create Token → Create Custom Token*.
-El token se guarda en el keyring del sistema, nunca en texto plano.
+## Authenticacion
+
+Dos formas de autenticarte (conviven; multi-sesión):
+
+- **Login con Cloudflare (OAuth)** — método por defecto: pulsa `Enter` en la
+  pantalla de autenticación, se abre el navegador, apruebas el acceso y listo.
+- **API Token** — pulsa `t` en la pantalla de autenticación : dashboard → *My Profile → API Tokens → Create Token → Create Custom Token*.
+
+Las credenciales se guardan en el keyring del sistema, nunca en texto plano.
+
+> **OAuth y R2:** las URLs prefirmadas siguen necesitando credenciales S3 de R2
+> (ver más abajo); la cobertura de Tunnels/R2 vía OAuth depende de los scopes
+> que apruebe tu cuenta.
 
 ## Requisitos
 

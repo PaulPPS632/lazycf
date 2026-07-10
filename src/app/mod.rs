@@ -77,12 +77,36 @@ enum Focus {
     WorkersLogFilter,
 }
 
-/// Un token verificado, con su cliente HTTP y sus cuentas visibles.
+/// Una credencial verificada, con su cliente HTTP y sus cuentas visibles.
 /// Todas las sesiones conviven; solo una (cuenta) está activa a la vez.
+///
+/// Fuente única de verdad: `source` es el MISMO `Arc` que usa su `CfClient`;
+/// tras un refresh OAuth interno del client, `source.credential()` ya devuelve
+/// los tokens rotados (una copia propia quedaría stale y persistiría un
+/// refresh_token muerto).
 struct Session {
-    token: String,
+    source: std::sync::Arc<crate::api::CredentialSource>,
     client: CfClient,
     accounts: Vec<Account>,
+    /// Credencial de `CLOUDFLARE_API_TOKEN`: no se persiste en el keyring.
+    from_env: bool,
+}
+
+impl Session {
+    /// Credencial vigente (siempre fresca).
+    fn credential(&self) -> secrets::Credential {
+        self.source.credential()
+    }
+
+    /// Sufijo enmascarado para distinguir la sesión sin exponer tokens.
+    fn label_suffix(&self) -> String {
+        match self.credential() {
+            secrets::Credential::ApiToken { token } => mask_token(&token),
+            secrets::Credential::OAuth { tokens } => {
+                format!("OAuth {}", mask_token(&tokens.access_token))
+            }
+        }
+    }
 }
 
 pub struct App {
@@ -101,6 +125,8 @@ pub struct App {
     active_account: usize,
     /// Verificaciones de token en vuelo (arranque / añadir).
     pending_verifications: usize,
+    /// Flujo de login OAuth en vuelo (para poder cancelarlo con Esc).
+    oauth_task: Option<tokio::task::AbortHandle>,
     config: Config,
     status: String,
 
@@ -176,6 +202,7 @@ impl App {
             active_session: 0,
             active_account: 0,
             pending_verifications: 0,
+            oauth_task: None,
             config,
             status: String::new(),
             all_zones: Vec::new(),
@@ -212,29 +239,27 @@ impl App {
             rect_r2_filter: None,
         };
 
-        match secrets::load_tokens() {
-            Ok(tokens) if !tokens.is_empty() => {
-                app.status = format!("Verificando {} token(s)…", tokens.len());
+        match secrets::load_credentials() {
+            Ok(creds) if !creds.is_empty() => {
+                app.status = format!("Verificando {} credencial(es)…", creds.len());
                 app.popup = Some(Popup::Token(TokenEntry {
-                    input: TextInput::default(),
                     verifying: true,
-                    error: None,
+                    ..TokenEntry::default()
                 }));
-                app.pending_verifications = tokens.len();
-                for token in tokens {
-                    app.spawn_verify(token);
+                app.pending_verifications = creds.len();
+                for c in creds {
+                    app.spawn_verify(c.credential, c.from_env);
                 }
             }
             Ok(_) => {
-                app.status = "Introduce tu API token de Cloudflare".into();
+                app.status = "Inicia sesión con Cloudflare".into();
                 app.popup = Some(Popup::Token(TokenEntry::default()));
             }
             Err(e) => {
                 app.status = "Error leyendo el keyring".into();
                 app.popup = Some(Popup::Token(TokenEntry {
-                    input: TextInput::default(),
-                    verifying: false,
                     error: Some(e.to_string()),
+                    ..TokenEntry::default()
                 }));
             }
         }
@@ -271,11 +296,17 @@ impl App {
         });
     }
 
-    /// Persiste todos los tokens de las sesiones en el keyring.
-    fn persist_tokens(&self) {
-        let tokens: Vec<String> = self.sessions.iter().map(|s| s.token.clone()).collect();
-        if let Err(e) = secrets::save_tokens(&tokens) {
-            tracing::warn!("no se pudieron guardar los tokens en el keyring: {e}");
+    /// Persiste las credenciales de las sesiones en el keyring, leyendo cada
+    /// `source` (siempre fresco tras refresh) y excluyendo la del env.
+    fn persist_credentials(&self) {
+        let creds: Vec<secrets::Credential> = self
+            .sessions
+            .iter()
+            .filter(|s| !s.from_env)
+            .map(|s| s.credential())
+            .collect();
+        if let Err(e) = secrets::save_credentials(&creds) {
+            tracing::warn!("no se pudieron guardar las credenciales en el keyring: {e}");
         }
     }
 
@@ -1120,10 +1151,36 @@ impl App {
                 let Some(Popup::Token(entry)) = self.popup.as_mut() else {
                     return None;
                 };
+                if entry.oauth_in_progress {
+                    // Esperando el navegador: solo se puede cancelar.
+                    return (key.code == KeyCode::Esc).then_some(Action::CancelOAuthLogin);
+                }
                 if entry.verifying {
                     return None;
                 }
+                // Pantalla por defecto: login OAuth (Enter); `t` = API token.
+                if !entry.manual {
+                    return match key.code {
+                        KeyCode::Enter => Some(Action::StartOAuthLogin),
+                        KeyCode::Char('t' | 'T') => {
+                            entry.manual = true;
+                            entry.error = None;
+                            None
+                        }
+                        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Some(Action::OpenTokenPage)
+                        }
+                        KeyCode::Esc if self.screen == Screen::Main => {
+                            self.popup = None;
+                            None
+                        }
+                        _ => None,
+                    };
+                }
                 match key.code {
+                    KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::StartOAuthLogin)
+                    }
                     KeyCode::Enter => {
                         if entry.input.value().trim().is_empty() {
                             entry.error = Some("El token está vacío".into());
@@ -1165,8 +1222,14 @@ impl App {
                         entry.input.insert(c);
                         None
                     }
-                    KeyCode::Esc if self.screen == Screen::Main => {
-                        self.popup = None;
+                    KeyCode::Esc => {
+                        if self.screen == Screen::Main {
+                            self.popup = None;
+                        } else {
+                            // Volver a la pantalla de login OAuth (default).
+                            entry.manual = false;
+                            entry.error = None;
+                        }
                         None
                     }
                     _ => None,
@@ -1222,17 +1285,26 @@ impl App {
                         let suffix = self
                             .sessions
                             .get(session)
-                            .map(|s| mask_token(&s.token))
+                            .map(Session::label_suffix)
                             .unwrap_or_default();
                         let n = self
                             .sessions
                             .get(session)
                             .map(|s| s.accounts.len())
                             .unwrap_or(0);
+                        let is_oauth = self
+                            .sessions
+                            .get(session)
+                            .is_some_and(|s| s.credential().is_oauth());
+                        let nota = if is_oauth {
+                            "(Se revocará la sesión OAuth en Cloudflare.)"
+                        } else {
+                            "(No borra nada en Cloudflare.)"
+                        };
                         self.popup = Some(Popup::Confirm(Confirm {
-                            title: "Eliminar token".into(),
+                            title: "Eliminar sesión".into(),
                             body: format!(
-                                "¿Eliminar el token {suffix} y sus {n} cuenta(s) de lazycf?\n(No borra nada en Cloudflare.)"
+                                "¿Eliminar la credencial {suffix} y sus {n} cuenta(s) de lazycf?\n{nota}"
                             ),
                             on_yes: Action::DeleteToken(session),
                         }));
@@ -2065,25 +2137,46 @@ impl App {
 
             Action::SubmitToken(token) => {
                 self.status = "Verificando token…".into();
-                self.spawn_verify(token);
+                self.spawn_verify(secrets::Credential::ApiToken { token }, false);
             }
-            Action::TokenVerified { token, accounts } => {
+            Action::CredentialVerified {
+                credential,
+                accounts,
+                from_env,
+            } => {
                 self.pending_verifications = self.pending_verifications.saturating_sub(1);
-                if self.sessions.iter().any(|s| s.token == token) {
+                // Dedup solo de API tokens por string; las credenciales OAuth
+                // rotan y no se dedupean.
+                let duplicated = match &credential {
+                    secrets::Credential::ApiToken { token } => self.sessions.iter().any(
+                        |s| matches!(s.credential(), secrets::Credential::ApiToken { token: t } if &t == token),
+                    ),
+                    secrets::Credential::OAuth { .. } => false,
+                };
+                if duplicated {
                     self.status = "Ese token ya está añadido".into();
                     if self.screen == Screen::Main
                         && matches!(self.popup, Some(Popup::Token(_)))
                     {
                         self.popup = None;
                     }
-                } else if let Ok(client) = CfClient::new(token.clone()) {
+                } else if let Ok((source, client)) = {
+                    // La sesión y su client comparten el MISMO source; el
+                    // client notifica cada refresh para persistir.
+                    let source = crate::api::CredentialSource::new(
+                        credential,
+                        Some(self.action_tx.clone()),
+                    );
+                    CfClient::from_source(source.clone()).map(|c| (source, c))
+                } {
                     let n = accounts.len();
                     self.sessions.push(Session {
-                        token,
+                        source,
                         client,
                         accounts,
+                        from_env,
                     });
-                    self.persist_tokens();
+                    self.persist_credentials();
                     if self.screen == Screen::Auth {
                         // Primera sesión válida → entrar a la app.
                         let si = self.sessions.len() - 1;
@@ -2120,9 +2213,8 @@ impl App {
                         }
                         _ => {
                             self.popup = Some(Popup::Token(TokenEntry {
-                                input: TextInput::default(),
-                                verifying: false,
                                 error: Some(msg),
+                                ..TokenEntry::default()
                             }));
                         }
                     }
@@ -2144,6 +2236,41 @@ impl App {
                 }
             },
             Action::OpenHelp => self.popup = Some(Popup::Help(self.build_help())),
+
+            Action::StartOAuthLogin => self.start_oauth_login(),
+            Action::CancelOAuthLogin => self.cancel_oauth_login(),
+            Action::OAuthUrl(url) => {
+                if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+                    entry.oauth_url = Some(url);
+                }
+            }
+            Action::OAuthCompleted(tokens) => {
+                self.oauth_task = None;
+                self.status = "Autorización recibida · verificando…".into();
+                if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+                    entry.oauth_in_progress = false;
+                    entry.oauth_url = None;
+                    entry.verifying = true;
+                }
+                self.pending_verifications += 1;
+                self.spawn_verify(secrets::Credential::OAuth { tokens }, false);
+            }
+            Action::OAuthFailed(msg) => {
+                self.oauth_task = None;
+                self.status = "Fallo en el login OAuth".into();
+                if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+                    entry.oauth_in_progress = false;
+                    entry.oauth_url = None;
+                    entry.error = Some(msg);
+                } else {
+                    self.status = format!("Login OAuth fallido: {msg}");
+                }
+            }
+            Action::CredentialRefreshed => {
+                // Un client refrescó su credencial OAuth (rotando el
+                // refresh_token): persistir la lista completa ya mismo.
+                self.persist_credentials();
+            }
 
             Action::OpenAccountPicker => self.open_account_picker(),
             Action::SwitchTo { session, account } => {
@@ -2194,8 +2321,22 @@ impl App {
                 if session >= self.sessions.len() {
                     return;
                 }
+                // Sesión OAuth: revocar el refresh_token (best-effort; si
+                // falla, la sesión se elimina localmente igual).
+                if let secrets::Credential::OAuth { tokens } =
+                    self.sessions[session].credential()
+                {
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            crate::oauth::revoke(&crate::oauth::client_id(), &tokens.refresh_token)
+                                .await
+                        {
+                            tracing::warn!("no se pudo revocar la sesión OAuth: {e}");
+                        }
+                    });
+                }
                 self.sessions.remove(session);
-                self.persist_tokens();
+                self.persist_credentials();
                 if self.sessions.is_empty() {
                     // Sin tokens: volver a la pantalla de autenticación.
                     self.active_session = 0;
@@ -2210,7 +2351,7 @@ impl App {
                     self.d1.reset();
                     self.r2.reset();
                     self.screen = Screen::Auth;
-                    self.status = "Sin tokens · introduce uno nuevo".into();
+                    self.status = "Sin sesiones · inicia sesión de nuevo".into();
                     self.popup = Some(Popup::Token(TokenEntry::default()));
                     return;
                 }
@@ -2882,7 +3023,7 @@ impl App {
     fn open_account_picker(&mut self) {
         let mut rows = Vec::new();
         for (si, s) in self.sessions.iter().enumerate() {
-            let suffix = mask_token(&s.token);
+            let suffix = s.label_suffix();
             if s.accounts.is_empty() {
                 // Token sin cuentas visibles: fila para poder eliminarlo.
                 rows.push(AccountRow {
@@ -2938,14 +3079,18 @@ impl App {
 
     // --- Tareas async ---
 
-    fn spawn_verify(&self, token: String) {
+    fn spawn_verify(&self, credential: secrets::Credential, from_env: bool) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
-            let action = match CfClient::new(token.clone()) {
+            let source = crate::api::CredentialSource::new(credential, None);
+            let action = match CfClient::from_source(source.clone()) {
                 Ok(client) => match client.authenticate().await {
-                    Ok(info) => Action::TokenVerified {
-                        token,
+                    // Re-leer del source: authenticate pudo refrescar una
+                    // credencial OAuth expirada (rotando el refresh_token).
+                    Ok(info) => Action::CredentialVerified {
+                        credential: source.credential(),
                         accounts: info.accounts,
+                        from_env,
                     },
                     Err(e) => Action::AuthFailed(e.to_string()),
                 },
@@ -2953,6 +3098,45 @@ impl App {
             };
             let _ = tx.send(action);
         });
+    }
+
+    /// Lanza el flujo de login OAuth en una tarea cancelable (Esc).
+    fn start_oauth_login(&mut self) {
+        if self.oauth_task.is_some() {
+            return; // ya hay un flujo en vuelo
+        }
+        self.status = "Abriendo el navegador… esperando autorización".into();
+        if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+            entry.error = None;
+            entry.oauth_in_progress = true;
+            entry.oauth_url = None;
+        }
+        let tx = self.action_tx.clone();
+        let handle = tokio::spawn(async move {
+            let url_tx = tx.clone();
+            let action = match crate::oauth::login(&crate::oauth::client_id(), move |url| {
+                let _ = url_tx.send(Action::OAuthUrl(url));
+            })
+            .await
+            {
+                Ok(tokens) => Action::OAuthCompleted(tokens),
+                Err(e) => Action::OAuthFailed(e.to_string()),
+            };
+            let _ = tx.send(action);
+        });
+        self.oauth_task = Some(handle.abort_handle());
+    }
+
+    /// Cancela el flujo OAuth en vuelo (aborta el listener de loopback).
+    fn cancel_oauth_login(&mut self) {
+        if let Some(task) = self.oauth_task.take() {
+            task.abort();
+            self.status = "Login OAuth cancelado".into();
+        }
+        if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+            entry.oauth_in_progress = false;
+            entry.oauth_url = None;
+        }
     }
 
     // --- Túneles ---
@@ -3376,7 +3560,7 @@ impl App {
             let suffix = self
                 .sessions
                 .get(self.active_session)
-                .map(|s| mask_token(&s.token))
+                .map(Session::label_suffix)
                 .unwrap_or_default();
             format!("{} {suffix}", self.active_account_name())
         } else {

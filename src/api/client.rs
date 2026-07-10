@@ -3,48 +3,160 @@
 //! Decodifica el envelope `CfResponse<T>`, aplica backoff ante 429 (rate limit
 //! global: 1200 req / 5 min por usuario) y expone helpers `get`/`post`/etc.
 //! Diseñado para pegarle a CUALQUIER endpoint sin depender del crate `cloudflare`.
+//!
+//! La credencial vive en un [`CredentialSource`] compartido: para OAuth el
+//! access token se refresca in situ (proactivo y ante 401) con single-flight,
+//! porque Cloudflare rota el `refresh_token` en cada uso y dos refresh
+//! concurrentes matarían la sesión.
 
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use color_eyre::eyre::{bail, eyre, Result};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use tokio::sync::mpsc::UnboundedSender;
 
+use crate::action::Action;
 use crate::model::CfResponse;
+use crate::oauth;
+use crate::secrets::Credential;
 
 const BASE: &str = "https://api.cloudflare.com/client/v4";
 const MAX_RETRIES: u32 = 3;
+/// Margen antes de `expires_at` para refrescar proactivamente (clock skew y
+/// requests en vuelo).
+const REFRESH_MARGIN_SECS: i64 = 60;
 
-/// Cliente autenticado con un API token (Bearer). Clonable y barato de copiar.
+/// Origen de credencial compartido entre todos los clones de un `CfClient` y
+/// su `Session`: fuente única de verdad, para que un refresh interno nunca
+/// deje copias stale (que persistirían un refresh_token ya rotado).
+pub struct CredentialSource {
+    cred: RwLock<Credential>,
+    /// Single-flight: solo un refresh a la vez entre tareas concurrentes.
+    refresh_lock: tokio::sync::Mutex<()>,
+    /// Notifica al App tras cada refresh para que persista la lista completa.
+    on_refresh: Option<UnboundedSender<Action>>,
+    client_id: String,
+    /// Override del token endpoint (solo tests); `None` = endpoint real.
+    token_url: Option<String>,
+}
+
+impl CredentialSource {
+    pub fn new(cred: Credential, on_refresh: Option<UnboundedSender<Action>>) -> Arc<Self> {
+        Arc::new(Self {
+            cred: RwLock::new(cred),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            on_refresh,
+            client_id: oauth::client_id(),
+            token_url: None,
+        })
+    }
+
+    /// Copia de la credencial vigente (siempre fresca tras un refresh).
+    pub fn credential(&self) -> Credential {
+        self.cred.read().unwrap().clone()
+    }
+
+    pub fn is_oauth(&self) -> bool {
+        self.credential().is_oauth()
+    }
+
+    /// Access token / API token vigente para `bearer_auth`.
+    fn access_token(&self) -> String {
+        match &*self.cred.read().unwrap() {
+            Credential::ApiToken { token } => token.clone(),
+            Credential::OAuth { tokens } => tokens.access_token.clone(),
+        }
+    }
+
+    /// `true` si es OAuth y el access token expiró o expira en breve.
+    fn needs_refresh(&self) -> bool {
+        match &*self.cred.read().unwrap() {
+            Credential::ApiToken { .. } => false,
+            Credential::OAuth { tokens } => tokens.expires_within(REFRESH_MARGIN_SECS),
+        }
+    }
+}
+
+/// Cliente autenticado (Bearer). Clonable y barato de copiar; todos los
+/// clones comparten el mismo `CredentialSource`.
 #[derive(Clone)]
 pub struct CfClient {
     http: Client,
-    token: String,
+    source: Arc<CredentialSource>,
 }
 
 impl CfClient {
-    pub fn new(token: String) -> Result<Self> {
+    /// Cliente sobre un origen de credencial compartido (OAuth o API token).
+    pub fn from_source(source: Arc<CredentialSource>) -> Result<Self> {
         let http = Client::builder()
             .user_agent(concat!("lazycf/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()?;
-        Ok(Self { http, token })
+        Ok(Self { http, source })
+    }
+
+    pub fn source(&self) -> &Arc<CredentialSource> {
+        &self.source
+    }
+
+    /// Token vigente para la request; refresca proactivamente si va a expirar.
+    async fn bearer(&self) -> Result<String> {
+        if self.source.needs_refresh() {
+            let stale = self.source.access_token();
+            self.refresh_credential(&stale).await?;
+        }
+        Ok(self.source.access_token())
+    }
+
+    /// Refresca la credencial OAuth con single-flight:
+    /// 1. Adquiere el lock de refresh (una tarea a la vez).
+    /// 2. Re-lee la credencial: si el access token ya cambió (otra tarea
+    ///    refrescó mientras esperábamos) no hace nada.
+    /// 3. Si no cambió, refresca contra el token endpoint, escribe el
+    ///    resultado y notifica al App para que persista.
+    ///
+    /// No-op para API tokens.
+    async fn refresh_credential(&self, stale_access: &str) -> Result<()> {
+        let _guard = self.source.refresh_lock.lock().await;
+        let Credential::OAuth { tokens } = self.source.credential() else {
+            return Ok(());
+        };
+        if tokens.access_token != stale_access {
+            return Ok(()); // otra tarea ya refrescó: reutilizar el token nuevo
+        }
+        let new_tokens = match &self.source.token_url {
+            Some(url) => {
+                oauth::refresh_at(url, &self.source.client_id, &tokens.refresh_token).await?
+            }
+            None => oauth::refresh(&self.source.client_id, &tokens.refresh_token).await?,
+        };
+        *self.source.cred.write().unwrap() = Credential::OAuth { tokens: new_tokens };
+        if let Some(tx) = &self.source.on_refresh {
+            let _ = tx.send(Action::CredentialRefreshed);
+        }
+        Ok(())
     }
 
     /// Ejecuta la petición con backoff ante 429 y devuelve `(status, body)`.
+    /// Con credencial OAuth, un 401 dispara un refresh (single-flight) y un
+    /// único reintento; si persiste, se devuelve el 401 tal cual (no loop).
     async fn raw<B>(&self, method: Method, path: &str, body: Option<&B>) -> Result<(StatusCode, String)>
     where
         B: Serialize + ?Sized,
     {
         let url = format!("{BASE}{path}");
         let mut attempt = 0u32;
+        let mut refreshed = false;
         loop {
             attempt += 1;
+            let token = self.bearer().await?;
             let mut req = self
                 .http
                 .request(method.clone(), &url)
-                .bearer_auth(&self.token);
+                .bearer_auth(&token);
             if let Some(b) = body {
                 req = req.json(b);
             }
@@ -56,6 +168,13 @@ impl CfClient {
             if status == StatusCode::TOO_MANY_REQUESTS && attempt <= MAX_RETRIES {
                 let wait = backoff_secs(&resp, attempt);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
+            }
+
+            // Access token OAuth expirado: refrescar y reintentar una vez.
+            if status == StatusCode::UNAUTHORIZED && !refreshed && self.source.is_oauth() {
+                refreshed = true;
+                self.refresh_credential(&token).await?;
                 continue;
             }
 
@@ -139,7 +258,7 @@ impl CfClient {
     /// En error el cuerpo es el envelope JSON → se extrae el mensaje.
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let url = format!("{BASE}{path}");
-        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+        let resp = self.http.get(&url).bearer_auth(self.bearer().await?).send().await?;
         let status = resp.status();
         let bytes = resp.bytes().await?;
         if !status.is_success() {
@@ -156,7 +275,7 @@ impl CfClient {
         let resp = self
             .http
             .put(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.bearer().await?)
             .header(reqwest::header::CONTENT_TYPE, content_type)
             .body(body)
             .send()
@@ -179,7 +298,7 @@ impl CfClient {
         let resp = self
             .http
             .request(method, &url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.bearer().await?)
             .multipart(form)
             .send()
             .await?;
@@ -302,6 +421,82 @@ fn error_context(text: &str, line: usize, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::oauth::OAuthTokens;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Servidor local que responde tokens nuevos y cuenta cuántos refresh recibe.
+    async fn mock_token_server(hits: Arc<AtomicUsize>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let hits = hits.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = stream.read(&mut buf).await;
+                    let n = hits.fetch_add(1, Ordering::SeqCst) + 1;
+                    let body = format!(
+                        r#"{{"access_token":"at-nuevo-{n}","token_type":"bearer","expires_in":3600,"refresh_token":"rt-nuevo-{n}","scope":"s"}}"#
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/oauth2/token")
+    }
+
+    #[tokio::test]
+    async fn single_flight_refresca_exactamente_una_vez() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let token_url = mock_token_server(hits.clone()).await;
+
+        // Credencial OAuth ya expirada → toda request necesita refresh.
+        let expirada = Credential::OAuth {
+            tokens: OAuthTokens {
+                access_token: "at-viejo".into(),
+                refresh_token: "rt-viejo".into(),
+                expires_at: 0,
+                scopes: "s".into(),
+            },
+        };
+        let source = Arc::new(CredentialSource {
+            cred: RwLock::new(expirada),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            on_refresh: None,
+            client_id: "cid".into(),
+            token_url: Some(token_url),
+        });
+        let client = CfClient::from_source(source.clone()).unwrap();
+
+        // N tareas concurrentes piden token con la credencial expirada.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move { c.bearer().await.unwrap() }));
+        }
+        let mut tokens = Vec::new();
+        for h in handles {
+            tokens.push(h.await.unwrap());
+        }
+
+        // Exactamente UN refresh; todas las tareas reutilizan el token nuevo.
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(tokens.iter().all(|t| t == "at-nuevo-1"), "{tokens:?}");
+        match source.credential() {
+            Credential::OAuth { tokens } => assert_eq!(tokens.refresh_token, "rt-nuevo-1"),
+            _ => panic!("debe seguir siendo OAuth"),
+        }
+    }
+
     use super::error_context;
 
     #[test]

@@ -19,10 +19,12 @@ pub enum Action {
     // --- Auth ---
     /// El usuario envió un token para verificar.
     SubmitToken(String),
-    /// Verificación OK: token válido + cuentas visibles.
-    TokenVerified {
-        token: String,
+    /// Verificación OK: credencial válida + cuentas visibles.
+    CredentialVerified {
+        credential: crate::secrets::Credential,
         accounts: Vec<Account>,
+        /// Viene de `CLOUDFLARE_API_TOKEN`: no se persiste en el keyring.
+        from_env: bool,
     },
     /// Fallo de autenticación (token inválido, red, keyring, etc.).
     AuthFailed(String),
@@ -30,6 +32,20 @@ pub enum Action {
     OpenTokenPage,
     /// Abrir el modal de ayuda con todos los atajos.
     OpenHelp,
+
+    // --- Auth: OAuth ---
+    /// Iniciar el flujo de login OAuth (abre navegador + listener local).
+    StartOAuthLogin,
+    /// Cancelar el flujo OAuth en vuelo (Esc en el popup).
+    CancelOAuthLogin,
+    /// URL de autorización lista (fallback para copiar/pegar, p. ej. SSH).
+    OAuthUrl(String),
+    /// El flujo OAuth terminó con tokens: verificar y crear la sesión.
+    OAuthCompleted(crate::oauth::OAuthTokens),
+    /// El flujo OAuth falló (denegado, timeout, red…).
+    OAuthFailed(String),
+    /// El client refrescó una credencial OAuth: persistir la lista actualizada.
+    CredentialRefreshed,
 
     // --- Cuentas / sesiones (multi-token) ---
     /// Abrir el selector de cuenta.
