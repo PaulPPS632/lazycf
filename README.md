@@ -41,6 +41,8 @@ cargo run -- --log lazycf.log   # escribe logs a archivo (por defecto no loggea)
 ```
 ## Authenticacion
 
+![Onboarding](images/onboarding.png)
+
 Dos formas de autenticarte (conviven; multi-sesión):
 
 - **Login con Cloudflare (OAuth)** — método por defecto: pulsa `Enter` en la

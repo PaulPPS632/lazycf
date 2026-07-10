@@ -25,6 +25,8 @@ lazycf
 ```
 ## Authenticacion
 
+![Onboarding](https://raw.githubusercontent.com/PaulPPS632/lazycf/main/images/onboarding.png)
+
 Dos formas de autenticarte (conviven; multi-sesión):
 
 - **Login con Cloudflare (OAuth)** — método por defecto: pulsa `Enter` en la
