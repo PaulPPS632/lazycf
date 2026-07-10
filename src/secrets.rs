@@ -94,9 +94,9 @@ pub fn load_credentials() -> Result<Vec<LoadedCredential>> {
 
     // Dedup de API tokens por string (los tokens OAuth rotan: no se dedupean).
     let has_api_token = |creds: &[LoadedCredential], t: &str| {
-        creds.iter().any(
-            |c| matches!(&c.credential, Credential::ApiToken { token } if token == t),
-        )
+        creds
+            .iter()
+            .any(|c| matches!(&c.credential, Credential::ApiToken { token } if token == t))
     };
 
     match tokens_entry()?.get_password() {
@@ -194,9 +194,7 @@ mod tests {
         let parsed = parse_stored(&json);
         assert_eq!(parsed.len(), 2);
         assert!(matches!(&parsed[0], Credential::ApiToken { token } if token == "tok-1"));
-        assert!(
-            matches!(&parsed[1], Credential::OAuth { tokens } if tokens.refresh_token == "rt")
-        );
+        assert!(matches!(&parsed[1], Credential::OAuth { tokens } if tokens.refresh_token == "rt"));
     }
 
     #[test]
@@ -228,6 +226,9 @@ mod tests {
             },
         };
         let dbg = format!("{o:?}");
-        assert!(!dbg.contains("at-secreto") && !dbg.contains("rt-secreto"), "{dbg}");
+        assert!(
+            !dbg.contains("at-secreto") && !dbg.contains("rt-secreto"),
+            "{dbg}"
+        );
     }
 }

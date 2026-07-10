@@ -15,28 +15,34 @@ use crate::ui::theme;
 /// o de carga dentro de un área ya enmarcada.
 pub fn dim(text: &str) -> Paragraph<'_> {
     Paragraph::new(text)
-        .style(Style::default().fg(theme::DIM))
+        .style(Style::default().fg(theme::dim()))
         .wrap(Wrap { trim: true })
 }
 
 /// Una línea tenue suelta (para listas de detalle).
 pub fn dim_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), Style::default().fg(theme::DIM)))
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(theme::dim()),
+    ))
 }
 
 /// Párrafo tenue dentro de un bloque con borde (placeholder de un panel).
 pub fn placeholder<'a>(text: &'a str, block: Block<'a>) -> Paragraph<'a> {
     Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(theme::DIM))
+        .style(Style::default().fg(theme::dim()))
         .wrap(Wrap { trim: true })
 }
 
 /// Fila `label` (tenue, ancho fijo) + `value` (color de primer plano).
 pub fn metric_line(label: &str, value: &str, width: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<width$}"), Style::default().fg(theme::DIM)),
-        Span::styled(value.to_string(), Style::default().fg(theme::FG)),
+        Span::styled(
+            format!("{label:<width$}"),
+            Style::default().fg(theme::dim()),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(theme::fg())),
     ])
 }
 
@@ -45,11 +51,16 @@ pub fn metric_line(label: &str, value: &str, width: usize) -> Line<'static> {
 pub fn field_row(label: &str, input: &TextInput, active: bool, width: usize) -> Line<'static> {
     let marker = if active { "▶ " } else { "  " };
     let label_style = if active {
-        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme::accent())
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::DIM)
+        Style::default().fg(theme::dim())
     };
-    let mut spans = vec![Span::styled(format!("{marker}{label:<width$}"), label_style)];
+    let mut spans = vec![Span::styled(
+        format!("{marker}{label:<width$}"),
+        label_style,
+    )];
     spans.extend(input.spans(active));
     Line::from(spans)
 }
@@ -59,14 +70,32 @@ pub fn tab_bar(tabs: &[&str], active: usize) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, t) in tabs.iter().enumerate() {
         let style = if i == active {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::dim())
         };
         spans.push(Span::styled(format!(" {} {} ", i + 1, t), style));
         if i + 1 < tabs.len() {
-            spans.push(Span::styled("·", Style::default().fg(theme::DIM)));
+            spans.push(Span::styled("·", Style::default().fg(theme::dim())));
         }
+    }
+    Line::from(spans)
+}
+
+/// Fila de un tema para el picker de primer arranque y la pantalla de config:
+/// marcador de tema confirmado (`●`), etiqueta y 6 muestras `██` pintadas con
+/// los colores del PROPIO tema listado (se ve la paleta sin activarla). `active`
+/// marca el tema actualmente guardado.
+pub fn theme_line(t: &theme::Theme, active: bool) -> Line<'static> {
+    let marker = if active { "● " } else { "  " };
+    let mut spans = vec![Span::styled(
+        format!("{marker}{:<12}", t.label),
+        Style::default().fg(theme::fg()),
+    )];
+    for c in [t.accent, t.fg, t.dim, t.error, t.ok, t.warn] {
+        spans.push(Span::styled("██", Style::default().fg(c)));
     }
     Line::from(spans)
 }
@@ -105,6 +134,28 @@ pub fn row_at(state: &mut ListState, len: usize, rel: usize) -> bool {
     let changed = state.selected() != Some(idx);
     state.select(Some(idx));
     changed
+}
+
+/// Spans enmascarados (`•`) de un `TextInput`, con cursor de bloque en su
+/// posición si `focused`. Usado por la pantalla de bienvenida y por el popup
+/// de "añadir token" (antes duplicado inline en cada uno).
+pub fn masked_input_spans(input: &TextInput, focused: bool) -> Vec<Span<'static>> {
+    let n = input.value().chars().count();
+    let bold = Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD);
+    if !focused {
+        return vec![Span::styled("•".repeat(n), bold)];
+    }
+    let cur = input.cursor().min(n);
+    let (at, after) = if cur < n {
+        ("•".to_string(), "•".repeat(n - cur - 1))
+    } else {
+        (" ".to_string(), String::new())
+    };
+    vec![
+        Span::styled("•".repeat(cur), bold),
+        Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)),
+        Span::styled(after, bold),
+    ]
 }
 
 /// Formatea un tamaño en bytes de forma legible (`B`/`KB`/`MB`/`GB`/`TB`).

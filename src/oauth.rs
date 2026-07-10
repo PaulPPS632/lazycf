@@ -185,7 +185,10 @@ enum Callback {
 /// Clasifica la primera línea de la request HTTP del navegador.
 fn parse_callback(request_line: &str, expected_state: &str) -> Callback {
     // "GET /oauth/callback?code=…&state=… HTTP/1.1"
-    let Some(target) = request_line.strip_prefix("GET ").and_then(|r| r.split(' ').next()) else {
+    let Some(target) = request_line
+        .strip_prefix("GET ")
+        .and_then(|r| r.split(' ').next())
+    else {
         return Callback::Ignore;
     };
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -301,7 +304,12 @@ async fn wait_for_code(
 
     tokio::time::timeout(timeout, accept_loop)
         .await
-        .map_err(|_| eyre!("tiempo de espera agotado ({}s) sin autorización", timeout.as_secs()))?
+        .map_err(|_| {
+            eyre!(
+                "tiempo de espera agotado ({}s) sin autorización",
+                timeout.as_secs()
+            )
+        })?
 }
 
 // --- Token endpoint ---
@@ -439,9 +447,15 @@ mod tests {
     fn pkce_verifier_valido_y_challenge_s256() {
         let (verifier, challenge) = generate_pkce();
         // Rango RFC 7636: 43–128 chars, charset base64url.
-        assert!((43..=128).contains(&verifier.len()), "len: {}", verifier.len());
         assert!(
-            verifier.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            (43..=128).contains(&verifier.len()),
+            "len: {}",
+            verifier.len()
+        );
+        assert!(
+            verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "charset: {verifier}"
         );
         let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -492,7 +506,10 @@ mod tests {
         let line = "GET /oauth/callback?code=abc&state=otro HTTP/1.1";
         assert!(matches!(parse_callback(line, "xyz"), Callback::BadState));
         let sin_state = "GET /oauth/callback?code=abc HTTP/1.1";
-        assert!(matches!(parse_callback(sin_state, "xyz"), Callback::BadState));
+        assert!(matches!(
+            parse_callback(sin_state, "xyz"),
+            Callback::BadState
+        ));
     }
 
     #[test]
@@ -503,7 +520,10 @@ mod tests {
             "POST /oauth/callback HTTP/1.1",
             "",
         ] {
-            assert!(matches!(parse_callback(line, "xyz"), Callback::Ignore), "{line}");
+            assert!(
+                matches!(parse_callback(line, "xyz"), Callback::Ignore),
+                "{line}"
+            );
         }
     }
 
@@ -516,7 +536,9 @@ mod tests {
             use tokio::io::AsyncWriteExt as _;
             // 1ª conexión: probe basura → debe ignorarse y seguir escuchando.
             let mut s1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-            s1.write_all(b"GET /favicon.ico HTTP/1.1\r\n\r\n").await.unwrap();
+            s1.write_all(b"GET /favicon.ico HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
             let mut sink = Vec::new();
             let _ = s1.read_to_end(&mut sink).await;
             // 2ª conexión: callback real.
@@ -528,7 +550,9 @@ mod tests {
             let _ = s2.read_to_end(&mut sink).await;
         });
 
-        let code = wait_for_code(listener, "st", Duration::from_secs(5)).await.unwrap();
+        let code = wait_for_code(listener, "st", Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(code, "c0de");
     }
 
@@ -547,7 +571,9 @@ mod tests {
             let _ = s.read_to_end(&mut sink).await;
         });
 
-        let err = wait_for_code(listener, "st", Duration::from_secs(5)).await.unwrap_err();
+        let err = wait_for_code(listener, "st", Duration::from_secs(5))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("access_denied"), "{err}");
     }
 }

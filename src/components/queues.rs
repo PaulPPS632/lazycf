@@ -1,15 +1,17 @@
 //! Vista del módulo Queues: lista de colas (izq) + detalle con pestañas
 //! (Resumen · Consumers · Métricas).
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Sparkline, Wrap};
-use ratatui::Frame;
 
 use crate::model::{Queue, QueueConsumer, QueueMetrics};
-use crate::ui::widgets::{dim, dim_line, human_size, metric_line, placeholder, short_date, tab_bar};
-use crate::ui::{theme, Loadable};
+use crate::ui::widgets::{
+    dim, dim_line, human_size, metric_line, placeholder, short_date, tab_bar,
+};
+use crate::ui::{Loadable, theme};
 
 pub const TABS: [&str; 3] = ["Resumen", "Consumers", "Métricas"];
 
@@ -49,8 +51,7 @@ impl QueuesView {
         let idx = prev_id
             .and_then(|id| self.queues.iter().position(|q| q.queue_id == id))
             .unwrap_or(0);
-        self.state
-            .select((!self.queues.is_empty()).then_some(idx));
+        self.state.select((!self.queues.is_empty()).then_some(idx));
     }
 
     /// Reinicia los datos de las pestañas (al cambiar de cola).
@@ -166,7 +167,9 @@ impl QueuesView {
         if let Loadable::Ready(cs) = &self.consumers {
             return cs;
         }
-        self.selected().map(|q| q.consumers.as_slice()).unwrap_or(&[])
+        self.selected()
+            .map(|q| q.consumers.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Script del consumer worker para el salto a logs: el seleccionado en la
@@ -214,10 +217,10 @@ impl QueuesView {
             .map(|q| {
                 let mut spans = vec![Span::styled(
                     q.queue_name.clone(),
-                    Style::default().fg(theme::FG),
+                    Style::default().fg(theme::fg()),
                 )];
                 if q.settings.delivery_paused {
-                    spans.push(Span::styled(" ⏸", Style::default().fg(theme::WARN)));
+                    spans.push(Span::styled(" ⏸", Style::default().fg(theme::warn())));
                 }
                 ListItem::new(Line::from(spans))
             })
@@ -232,7 +235,11 @@ impl QueuesView {
     pub fn draw_detail(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let title = match self.selected() {
             Some(q) if !q.modified_on.is_empty() => {
-                format!(" {} · mod {} ", q.queue_name, short_date(&q.modified_on, 16))
+                format!(
+                    " {} · mod {} ",
+                    q.queue_name,
+                    short_date(&q.modified_on, 16)
+                )
             }
             Some(q) => format!(" {} ", q.queue_name),
             None => " Detalle ".to_string(),
@@ -246,7 +253,7 @@ impl QueuesView {
 
         if self.selected().is_none() {
             frame.render_widget(
-                Paragraph::new("Selecciona una cola").style(Style::default().fg(theme::DIM)),
+                Paragraph::new("Selecciona una cola").style(Style::default().fg(theme::dim())),
                 inner,
             );
             return;
@@ -254,7 +261,11 @@ impl QueuesView {
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(inner);
         frame.render_widget(tab_bar(&TABS, self.active_tab), rows[0]);
         // rows[1] queda como separador visual.
@@ -276,12 +287,15 @@ impl QueuesView {
         ];
         // Estado de la entrega.
         let (estado, color) = if q.settings.delivery_paused {
-            ("⏸ pausada", theme::WARN)
+            ("⏸ pausada", theme::warn())
         } else {
-            ("● activa", theme::OK)
+            ("● activa", theme::ok())
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "Entrega"), Style::default().fg(theme::DIM)),
+            Span::styled(
+                format!("{:<12}", "Entrega"),
+                Style::default().fg(theme::dim()),
+            ),
             Span::styled(estado, Style::default().fg(color)),
         ]));
         lines.push(metric_line(
@@ -316,9 +330,12 @@ impl QueuesView {
                 .or_else(|| p.bucket_name.clone())
                 .unwrap_or_else(|| "—".into());
             lines.push(Line::from(vec![
-                Span::styled("▪ ", Style::default().fg(theme::ACCENT)),
-                Span::styled(format!("{:<10}", p.ptype), Style::default().fg(theme::DIM)),
-                Span::styled(label, Style::default().fg(theme::FG)),
+                Span::styled("▪ ", Style::default().fg(theme::accent())),
+                Span::styled(
+                    format!("{:<10}", p.ptype),
+                    Style::default().fg(theme::dim()),
+                ),
+                Span::styled(label, Style::default().fg(theme::fg())),
             ]));
         }
 
@@ -332,9 +349,12 @@ impl QueuesView {
         }
         for c in &q.consumers {
             lines.push(Line::from(vec![
-                Span::styled("▪ ", Style::default().fg(theme::ACCENT)),
-                Span::styled(format!("{:<10}", c.ctype), Style::default().fg(theme::DIM)),
-                Span::styled(c.label(), Style::default().fg(theme::FG)),
+                Span::styled("▪ ", Style::default().fg(theme::accent())),
+                Span::styled(
+                    format!("{:<10}", c.ctype),
+                    Style::default().fg(theme::dim()),
+                ),
+                Span::styled(c.label(), Style::default().fg(theme::fg())),
             ]));
         }
 
@@ -362,15 +382,14 @@ impl QueuesView {
                         let marker = if selected { "▶ " } else { "  " };
                         let name_style = if selected {
                             Style::default()
-                                .fg(theme::ACCENT)
+                                .fg(theme::accent())
                                 .add_modifier(ratatui::style::Modifier::BOLD)
                         } else {
-                            Style::default().fg(theme::ACCENT)
+                            Style::default().fg(theme::accent())
                         };
                         let s = &c.settings;
-                        let fmt = |v: Option<u64>| {
-                            v.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
-                        };
+                        let fmt =
+                            |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_else(|| "—".into());
                         let mut extra = format!(
                             "batch {} · retries {} · delay {}s",
                             fmt(s.batch_size),
@@ -394,10 +413,10 @@ impl QueuesView {
                         Line::from(vec![
                             Span::styled(
                                 format!("{marker}{:<10}", c.ctype),
-                                Style::default().fg(theme::DIM),
+                                Style::default().fg(theme::dim()),
                             ),
                             Span::styled(format!("{:<24}", c.label()), name_style),
-                            Span::styled(extra, Style::default().fg(theme::FG)),
+                            Span::styled(extra, Style::default().fg(theme::fg())),
                         ])
                     })
                     .collect();
@@ -434,16 +453,13 @@ impl QueuesView {
                     Line::from(""),
                 ];
                 frame.render_widget(Paragraph::new(head), split[0]);
-                frame.render_widget(
-                    Paragraph::new(dim_line("backlog / hora (24h):")),
-                    split[1],
-                );
+                frame.render_widget(Paragraph::new(dim_line("backlog / hora (24h):")), split[1]);
                 if m.series_backlog.is_empty() {
                     frame.render_widget(dim("(sin datos)"), split[2]);
                 } else {
                     let spark = Sparkline::default()
                         .data(&m.series_backlog)
-                        .style(Style::default().fg(theme::ACCENT));
+                        .style(Style::default().fg(theme::accent()));
                     frame.render_widget(spark, split[2]);
                 }
                 frame.render_widget(
@@ -455,11 +471,10 @@ impl QueuesView {
                 } else {
                     let spark = Sparkline::default()
                         .data(&m.series_written)
-                        .style(Style::default().fg(theme::OK));
+                        .style(Style::default().fg(theme::ok()));
                     frame.render_widget(spark, split[4]);
                 }
             }
         }
     }
 }
-

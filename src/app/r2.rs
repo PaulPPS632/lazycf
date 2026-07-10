@@ -300,7 +300,9 @@ impl App {
                                 )),
                             }
                         }
-                        Err(e) => Action::ObjectError(format!("escribiendo {}: {e}", dest.display())),
+                        Err(e) => {
+                            Action::ObjectError(format!("escribiendo {}: {e}", dest.display()))
+                        }
                     }
                 }
                 Err(e) => Action::ObjectError(e.to_string()),
@@ -438,7 +440,13 @@ impl App {
         self.status = "Creando carpeta…".into();
         tokio::spawn(async move {
             let action = match client
-                .put_object(&account_id, &bucket, &key, Vec::new(), "application/x-directory")
+                .put_object(
+                    &account_id,
+                    &bucket,
+                    &key,
+                    Vec::new(),
+                    "application/x-directory",
+                )
                 .await
             {
                 Ok(()) => Action::ObjectMutated(format!("Carpeta {name}/ creada")),
@@ -450,7 +458,12 @@ impl App {
 
     /// Renombrar = descargar + subir con la nueva clave + borrar la vieja
     /// (el API de R2 no ofrece copia server-side por este endpoint).
-    pub(crate) fn spawn_rename_object(&mut self, old_key: String, new_key: String, content_type: Option<String>) {
+    pub(crate) fn spawn_rename_object(
+        &mut self,
+        old_key: String,
+        new_key: String,
+        content_type: Option<String>,
+    ) {
         let (Some(client), Some(account_id), Some(bucket)) = (
             self.client(),
             self.active_account_id().map(String::from),
@@ -677,7 +690,10 @@ impl App {
     pub(crate) fn spawn_set_public_domain(&mut self, bucket: String, enabled: bool) {
         self.status = "Actualizando dominio público…".into();
         self.spawn_api(move |client, account_id, tx| async move {
-            let action = match client.set_public_domain(&account_id, &bucket, enabled).await {
+            let action = match client
+                .set_public_domain(&account_id, &bucket, enabled)
+                .await
+            {
                 Ok(()) => Action::DomainsMutated(if enabled {
                     "Dominio r2.dev habilitado (bucket público)".into()
                 } else {
@@ -780,9 +796,7 @@ impl App {
                 crate::tui::osc52_copy(&url);
                 self.popup = Some(Popup::Message(Message {
                     title: "URL prefirmada".into(),
-                    body: format!(
-                        "{url}\n\nVálida {expires}s · copiada al portapapeles (OSC 52)."
-                    ),
+                    body: format!("{url}\n\nVálida {expires}s · copiada al portapapeles (OSC 52)."),
                     is_error: false,
                 }));
             }

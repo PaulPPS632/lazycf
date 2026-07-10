@@ -1,25 +1,19 @@
 //! Vista del módulo Workers: lista de scripts (izq) + detalle con pestañas
 //! (Métricas · Implementaciones · Variables · Logs).
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Sparkline, Wrap};
-use ratatui::Frame;
 
 use crate::api::workers::TailEvent;
 use crate::components::input::TextInput;
 use crate::model::{Binding, Deployment, WorkerMetrics, WorkerScript};
 use crate::ui::widgets::{dim, dim_line, metric_line, placeholder, short_date, tab_bar};
-use crate::ui::{theme, Loadable};
+use crate::ui::{Loadable, theme};
 
-pub const TABS: [&str; 5] = [
-    "Métricas",
-    "Implementaciones",
-    "Variables",
-    "Logs",
-    "Rutas",
-];
+pub const TABS: [&str; 5] = ["Métricas", "Implementaciones", "Variables", "Logs", "Rutas"];
 
 /// Rutas de zona + custom domains que apuntan a un Worker.
 #[derive(Debug, Clone, Default)]
@@ -437,7 +431,13 @@ impl WorkersView {
         frame.render_stateful_widget(list, area, &mut self.state);
     }
 
-    pub fn draw_detail(&mut self, frame: &mut Frame, area: Rect, focused: bool, filter_focused: bool) {
+    pub fn draw_detail(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        focused: bool,
+        filter_focused: bool,
+    ) {
         // El título se calcula antes de tomar `&mut self` en los draws.
         let title = match self.selected() {
             Some(s) if !s.modified_on.is_empty() => {
@@ -455,7 +455,7 @@ impl WorkersView {
 
         if self.selected().is_none() {
             frame.render_widget(
-                Paragraph::new("Selecciona un worker").style(Style::default().fg(theme::DIM)),
+                Paragraph::new("Selecciona un worker").style(Style::default().fg(theme::dim())),
                 inner,
             );
             return;
@@ -463,7 +463,11 @@ impl WorkersView {
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(inner);
         frame.render_widget(tab_bar(&TABS, self.active_tab), rows[0]);
         // rows[1] queda como separador visual.
@@ -495,14 +499,17 @@ impl WorkersView {
                     metric_line("Requests", &m.requests.to_string(), 12),
                     metric_line("Errores", &m.errors.to_string(), 12),
                     Line::from(vec![
-                        Span::styled(format!("{:<12}", "Tasa error"), Style::default().fg(theme::DIM)),
+                        Span::styled(
+                            format!("{:<12}", "Tasa error"),
+                            Style::default().fg(theme::dim()),
+                        ),
                         Span::styled(format!("{rate:.2}%"), Style::default().fg(rate_color(rate))),
                     ]),
                     metric_line("CPU p50", &format!("{:.0} µs", m.cpu_p50), 12),
                     metric_line("CPU p99", &format!("{:.0} µs", m.cpu_p99), 12),
                     Line::from(Span::styled(
                         "requests / hora (24h):",
-                        Style::default().fg(theme::DIM),
+                        Style::default().fg(theme::dim()),
                     )),
                 ];
                 frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), split[0]);
@@ -511,7 +518,7 @@ impl WorkersView {
                 } else {
                     let spark = Sparkline::default()
                         .data(&m.series)
-                        .style(Style::default().fg(theme::ACCENT));
+                        .style(Style::default().fg(theme::accent()));
                     frame.render_widget(spark, split[1]);
                 }
             }
@@ -540,15 +547,15 @@ impl WorkersView {
                             Span::raw(short_date(&dep.created_on, 16)),
                             Span::styled(
                                 format!("  {}", dep.author_email),
-                                Style::default().fg(theme::FG),
+                                Style::default().fg(theme::fg()),
                             ),
                             Span::styled(
                                 format!("  ({})", dep.source),
-                                Style::default().fg(theme::DIM),
+                                Style::default().fg(theme::dim()),
                             ),
                         ];
                         if i == 0 {
-                            spans.push(Span::styled(" · activo", Style::default().fg(theme::OK)));
+                            spans.push(Span::styled(" · activo", Style::default().fg(theme::ok())));
                         }
                         ListItem::new(Line::from(spans))
                     })
@@ -583,12 +590,15 @@ impl WorkersView {
             Loadable::Ready(r) => {
                 let mut lines: Vec<Line> = Vec::new();
                 if !r.routes.is_empty() {
-                    lines.push(Line::from(Span::styled("Rutas de zona:", theme::title(false))));
+                    lines.push(Line::from(Span::styled(
+                        "Rutas de zona:",
+                        theme::title(false),
+                    )));
                     for (pattern, zone) in &r.routes {
                         lines.push(Line::from(vec![
-                            Span::styled("▪ ", Style::default().fg(theme::ACCENT)),
-                            Span::styled(pattern.clone(), Style::default().fg(theme::FG)),
-                            Span::styled(format!("  ({zone})"), Style::default().fg(theme::DIM)),
+                            Span::styled("▪ ", Style::default().fg(theme::accent())),
+                            Span::styled(pattern.clone(), Style::default().fg(theme::fg())),
+                            Span::styled(format!("  ({zone})"), Style::default().fg(theme::dim())),
                         ]));
                     }
                 }
@@ -596,11 +606,14 @@ impl WorkersView {
                     if !lines.is_empty() {
                         lines.push(Line::from(""));
                     }
-                    lines.push(Line::from(Span::styled("Custom domains:", theme::title(false))));
+                    lines.push(Line::from(Span::styled(
+                        "Custom domains:",
+                        theme::title(false),
+                    )));
                     for host in &r.domains {
                         lines.push(Line::from(vec![
-                            Span::styled("▪ ", Style::default().fg(theme::ACCENT)),
-                            Span::styled(host.clone(), Style::default().fg(theme::FG)),
+                            Span::styled("▪ ", Style::default().fg(theme::accent())),
+                            Span::styled(host.clone(), Style::default().fg(theme::fg())),
                         ]));
                     }
                 }
@@ -624,19 +637,22 @@ impl WorkersView {
                         let marker = if selected { "▶ " } else { "  " };
                         let name_style = if selected {
                             Style::default()
-                                .fg(theme::ACCENT)
+                                .fg(theme::accent())
                                 .add_modifier(ratatui::style::Modifier::BOLD)
                         } else {
-                            Style::default().fg(theme::ACCENT)
+                            Style::default().fg(theme::accent())
                         };
                         let value_style = if bind.is_secret() {
-                            Style::default().fg(theme::WARN)
+                            Style::default().fg(theme::warn())
                         } else {
-                            Style::default().fg(theme::FG)
+                            Style::default().fg(theme::fg())
                         };
                         Line::from(vec![
                             Span::styled(format!("{marker}{:<20}", bind.name), name_style),
-                            Span::styled(format!("{:<12}", bind.btype), Style::default().fg(theme::DIM)),
+                            Span::styled(
+                                format!("{:<12}", bind.btype),
+                                Style::default().fg(theme::dim()),
+                            ),
                             Span::styled(bind.display_value(), value_style),
                         ])
                     })
@@ -669,33 +685,42 @@ impl WorkersView {
 
         // Cabecera de estado.
         let (state_text, state_color) = if !self.tailing {
-            ("○ detenido · 'l' para iniciar".to_string(), theme::DIM)
+            ("○ detenido · 'l' para iniciar".to_string(), theme::dim())
         } else if self.log_follow {
-            ("● en vivo (siguiendo)".to_string(), theme::OK)
+            ("● en vivo (siguiendo)".to_string(), theme::ok())
         } else {
-            ("● en vivo · ⏸ pausado (End sigue)".to_string(), theme::WARN)
+            (
+                "● en vivo · ⏸ pausado (End sigue)".to_string(),
+                theme::warn(),
+            )
         };
         let mut header = vec![Span::styled(state_text, Style::default().fg(state_color))];
         if self.log_errors_only {
-            header.push(Span::styled(" · solo errores", Style::default().fg(theme::WARN)));
+            header.push(Span::styled(
+                " · solo errores",
+                Style::default().fg(theme::warn()),
+            ));
         }
         let filter_val = self.log_filter.value().trim().to_string();
         if !filter_val.is_empty() {
             header.push(Span::styled(
                 format!(" · /{filter_val}"),
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             ));
         }
         frame.render_widget(Paragraph::new(Line::from(header)), rows[0]);
 
         // Barra de filtro (o hint).
         if filter_focused || !self.log_filter.value().is_empty() {
-            frame.render_widget(Paragraph::new(Line::from(self.log_filter.spans(filter_focused))), rows[1]);
+            frame.render_widget(
+                Paragraph::new(Line::from(self.log_filter.spans(filter_focused))),
+                rows[1],
+            );
         } else {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "/ filtrar · E solo errores · Enter detalle · y copiar",
-                    Style::default().fg(theme::DIM),
+                    Style::default().fg(theme::dim()),
                 ))),
                 rows[1],
             );
@@ -707,7 +732,11 @@ impl WorkersView {
             .iter()
             .filter_map(|&i| self.logs.get(i))
             .map(|e| {
-                let color = if e.is_error { theme::ERROR } else { theme::FG };
+                let color = if e.is_error {
+                    theme::error()
+                } else {
+                    theme::fg()
+                };
                 ListItem::new(Line::from(Span::styled(
                     e.summary.clone(),
                     Style::default().fg(color),
@@ -732,10 +761,10 @@ pub fn split(main: Rect) -> (Rect, Rect) {
 
 fn rate_color(rate: f64) -> ratatui::style::Color {
     if rate < 1.0 {
-        theme::OK
+        theme::ok()
     } else if rate < 5.0 {
-        theme::WARN
+        theme::warn()
     } else {
-        theme::ERROR
+        theme::error()
     }
 }

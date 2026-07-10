@@ -49,17 +49,13 @@ struct RawMeta {
 impl CfClient {
     /// `GET /accounts/{id}/d1/database` — bases de datos D1 de la cuenta.
     pub async fn list_databases(&self, account_id: &str) -> Result<Vec<D1Database>> {
-        self.get(&format!("/accounts/{account_id}/d1/database")).await
+        self.get(&format!("/accounts/{account_id}/d1/database"))
+            .await
     }
 
     /// `POST .../d1/database/{db}/raw` — ejecuta SQL y devuelve la última
     /// sentencia como tabla (columnas + filas ya en orden).
-    pub async fn d1_query(
-        &self,
-        account_id: &str,
-        db_id: &str,
-        sql: &str,
-    ) -> Result<QueryOutcome> {
+    pub async fn d1_query(&self, account_id: &str, db_id: &str, sql: &str) -> Result<QueryOutcome> {
         let body = json!({ "sql": sql });
         let mut results: Vec<RawResult> = self
             .post(
@@ -180,7 +176,7 @@ fn cell_to_string(v: serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{outcome_from_rows, parse_create_columns, RawResult, RawRows, MAX_GRID_ROWS};
+    use super::{MAX_GRID_ROWS, RawResult, RawRows, outcome_from_rows, parse_create_columns};
 
     #[test]
     fn resultado_enorme_se_trunca_al_tope() {
@@ -205,7 +201,10 @@ mod tests {
         let r = RawResult {
             results: RawRows {
                 columns: vec!["v".into()],
-                rows: vec![vec![serde_json::json!("hola")], vec![serde_json::Value::Null]],
+                rows: vec![
+                    vec![serde_json::json!("hola")],
+                    vec![serde_json::Value::Null],
+                ],
             },
             meta: Default::default(),
             success: true,

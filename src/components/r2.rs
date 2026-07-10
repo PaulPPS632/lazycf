@@ -5,17 +5,19 @@
 
 use std::collections::HashSet;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::api::r2::ObjectList;
 use crate::components::input::TextInput;
 use crate::model::{CustomDomain, PublicDomain, R2Bucket, R2Object, R2Usage};
-use crate::ui::widgets::{dim, dim_line, human_size, metric_line, placeholder, row_at, select_wrap, short_date};
-use crate::ui::{theme, Loadable};
+use crate::ui::widgets::{
+    dim, dim_line, human_size, metric_line, placeholder, row_at, select_wrap, short_date,
+};
+use crate::ui::{Loadable, theme};
 
 /// Detalle + uso + dominios + CORS de un bucket (se cargan juntos).
 #[derive(Debug, Clone)]
@@ -192,7 +194,8 @@ impl R2View {
         if !self.prefix.is_empty() {
             self.entries.push(Entry::Up);
         }
-        self.entries.extend(list.folders.into_iter().map(Entry::Folder));
+        self.entries
+            .extend(list.folders.into_iter().map(Entry::Folder));
         self.entries.extend(list.files.into_iter().map(Entry::File));
         self.recompute_visible();
         self.obj_state
@@ -578,7 +581,7 @@ impl R2View {
         if let Some(e) = &self.objects_error {
             frame.render_widget(
                 Paragraph::new(format!("✗ {e}"))
-                    .style(Style::default().fg(theme::ERROR))
+                    .style(Style::default().fg(theme::error()))
                     .wrap(Wrap { trim: true }),
                 inner,
             );
@@ -586,7 +589,10 @@ impl R2View {
         }
         if self.visible.is_empty() {
             let text = if !self.filter_is_empty() {
-                format!("(sin coincidencias para «{}») · Esc limpia el filtro", self.filter.value().trim())
+                format!(
+                    "(sin coincidencias para «{}») · Esc limpia el filtro",
+                    self.filter.value().trim()
+                )
             } else if self.is_searching() {
                 "(sin resultados) · Esc volver".to_string()
             } else {
@@ -646,7 +652,10 @@ impl R2View {
             }
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(theme::DIM)))),
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(theme::dim()),
+            ))),
             rows[1],
         );
     }
@@ -663,12 +672,15 @@ impl R2View {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "pulsa / y escribe para filtrar por nombre",
-                    Style::default().fg(theme::DIM),
+                    Style::default().fg(theme::dim()),
                 )),
                 inner,
             );
         } else {
-            frame.render_widget(Paragraph::new(Line::from(self.filter.spans(focused))), inner);
+            frame.render_widget(
+                Paragraph::new(Line::from(self.filter.spans(focused))),
+                inner,
+            );
         }
     }
 }
@@ -679,13 +691,13 @@ fn entry_item(entry: &Entry, width: usize, marked: bool, full_key: bool) -> List
     match entry {
         Entry::Up => ListItem::new(Line::from(Span::styled(
             "⬆ ..",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))),
         Entry::Folder(prefix) => {
             let name = folder_name(prefix);
             ListItem::new(Line::from(vec![
-                Span::styled("📁 ", Style::default().fg(theme::ACCENT)),
-                Span::styled(format!("{name}/"), Style::default().fg(theme::FG)),
+                Span::styled("📁 ", Style::default().fg(theme::accent())),
+                Span::styled(format!("{name}/"), Style::default().fg(theme::fg())),
             ]))
         }
         Entry::File(o) => {
@@ -694,7 +706,11 @@ fn entry_item(entry: &Entry, width: usize, marked: bool, full_key: bool) -> List
             } else {
                 o.filename().to_string()
             };
-            let meta = format!("{:>10}  {}", human_size(o.size), short_date(&o.last_modified, 10));
+            let meta = format!(
+                "{:>10}  {}",
+                human_size(o.size),
+                short_date(&o.last_modified, 10)
+            );
             // Nombre a la izquierda, meta a la derecha (recortando el nombre).
             let avail = width.saturating_sub(meta.len() + 5).max(8);
             let shown: String = if name.chars().count() > avail {
@@ -704,16 +720,16 @@ fn entry_item(entry: &Entry, width: usize, marked: bool, full_key: bool) -> List
                 format!("{name:<avail$}")
             };
             let (icon, icon_color) = if marked {
-                ("✓ ", theme::ACCENT)
+                ("✓ ", theme::accent())
             } else if o.is_image() {
-                ("🖼 ", theme::DIM)
+                ("🖼 ", theme::dim())
             } else {
-                ("· ", theme::DIM)
+                ("· ", theme::dim())
             };
             ListItem::new(Line::from(vec![
                 Span::styled(icon, Style::default().fg(icon_color)),
-                Span::styled(shown, Style::default().fg(theme::FG)),
-                Span::styled(format!("  {meta}"), Style::default().fg(theme::DIM)),
+                Span::styled(shown, Style::default().fg(theme::fg())),
+                Span::styled(format!("  {meta}"), Style::default().fg(theme::dim())),
             ]))
         }
     }
@@ -744,14 +760,20 @@ fn info_lines(info: &BucketInfo) -> Vec<Line<'static>> {
 
     // Dominio público (r2.dev): existe aunque esté deshabilitado.
     let (pub_text, pub_color) = if info.public.domain.is_empty() {
-        ("no disponible".to_string(), theme::DIM)
+        ("no disponible".to_string(), theme::dim())
     } else if info.public.enabled {
-        (format!("https://{}", info.public.domain), theme::OK)
+        (format!("https://{}", info.public.domain), theme::ok())
     } else {
-        (format!("{} (deshabilitado)", info.public.domain), theme::DIM)
+        (
+            format!("{} (deshabilitado)", info.public.domain),
+            theme::dim(),
+        )
     };
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<11}", "Público"), Style::default().fg(theme::DIM)),
+        Span::styled(
+            format!("{:<11}", "Público"),
+            Style::default().fg(theme::dim()),
+        ),
         Span::styled(pub_text, Style::default().fg(pub_color)),
     ]));
 
@@ -768,12 +790,12 @@ fn info_lines(info: &BucketInfo) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled("Dominios:", theme::title(false))));
         for dom in &info.domains {
             let (text, color) = if dom.enabled {
-                (dom.domain.clone(), theme::FG)
+                (dom.domain.clone(), theme::fg())
             } else {
-                (format!("{} (deshabilitado)", dom.domain), theme::DIM)
+                (format!("{} (deshabilitado)", dom.domain), theme::dim())
             };
             lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(theme::ACCENT)),
+                Span::styled("• ", Style::default().fg(theme::accent())),
                 Span::styled(text, Style::default().fg(color)),
             ]));
         }
@@ -832,7 +854,11 @@ pub fn image_lines(w: u32, h: u32, rgb: &[u8]) -> Vec<Line<'static>> {
         let mut spans = Vec::with_capacity(w as usize);
         for x in 0..w {
             let top = px(x, y);
-            let bottom = if y + 1 < h { px(x, y + 1) } else { Color::Black };
+            let bottom = if y + 1 < h {
+                px(x, y + 1)
+            } else {
+                Color::Black
+            };
             spans.push(Span::styled("▀", Style::default().fg(top).bg(bottom)));
         }
         lines.push(Line::from(spans));
@@ -840,4 +866,3 @@ pub fn image_lines(w: u32, h: u32, rgb: &[u8]) -> Vec<Line<'static>> {
     }
     lines
 }
-

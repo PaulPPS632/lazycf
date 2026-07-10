@@ -1,10 +1,10 @@
 //! Endpoints de Túneles de Cloudflare (Zero Trust / cfd_tunnel), Fase 2.
 //! Todos account-scoped: requieren el `account_id` de la cuenta activa.
 
-use color_eyre::eyre::{bail, Result};
+use color_eyre::eyre::{Result, bail};
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::CfClient;
 use crate::model::{IngressRule, Tunnel};
@@ -73,8 +73,7 @@ impl CfClient {
         account_id: &str,
         tunnel_id: &str,
     ) -> Result<(Value, Vec<Value>)> {
-        let cfg_path =
-            format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations");
+        let cfg_path = format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations");
         let current = self.get_value(&cfg_path).await?;
         let mut config = current["result"]["config"].clone();
         if !config.is_object() {
@@ -107,8 +106,7 @@ impl CfClient {
     ) -> Result<()> {
         ingress.push(json!({ "service": "http_status:404" }));
         config["ingress"] = Value::Array(ingress);
-        let cfg_path =
-            format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations");
+        let cfg_path = format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations");
         self.send_ok(Method::PUT, &cfg_path, Some(&json!({ "config": config })))
             .await
     }

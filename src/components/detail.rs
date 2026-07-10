@@ -1,10 +1,10 @@
 //! Panel principal: detalle del módulo seleccionado. En Fase 0 muestra un
 //! placeholder por módulo; cada fase posterior lo reemplaza por su vista real.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::Module;
 use crate::ui::theme;

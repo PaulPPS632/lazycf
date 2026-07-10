@@ -262,6 +262,7 @@ export CLOUDFLARE_API_TOKEN="<tu-token>"
 ![Multi Cuenta](images/multicuenta.png)
 
 - **Multi-cuenta y multi-token**: selector de cuenta activa (`A`), tokens en el keyring del sistema.
+- **Temas** seleccionables: Cloudflare (por defecto), Everforest y Tokyo Night. Se eligen en el primer arranque y desde la pantalla de configuración (`,`); se guardan en `config.toml`.
 - **Mouse completo**: click enfoca y selecciona, scroll navega cualquier panel.
 - Ayuda contextual (`?`) con los atajos del panel activo; barra de estado con hints.
 - Render bajo demanda: CPU ≈ 0 en reposo.
@@ -275,6 +276,7 @@ export CLOUDFLARE_API_TOKEN="<tu-token>"
 | `Enter` | Acción principal del panel |
 | `r` | Recargar los datos del panel activo |
 | `A` | Selector de cuenta activa |
+| `,` | Pantalla de configuración (tema, cuentas, idioma) |
 | `?` | Ayuda contextual con los atajos del panel activo |
 | `q` / `Ctrl-C` | Salir |
 | Mouse | Click enfoca y selecciona; scroll navega cualquier panel |

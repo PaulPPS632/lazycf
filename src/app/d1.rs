@@ -50,7 +50,9 @@ impl App {
         let sql = format!("SELECT * FROM {} LIMIT 50", quote_ident(&table));
         self.d1.set_sql(sql.clone());
         self.d1
-            .set_filter_base(Some(crate::components::d1::FilterBase::Table(table.clone())));
+            .set_filter_base(Some(crate::components::d1::FilterBase::Table(
+                table.clone(),
+            )));
         self.spawn_d1_query(db_id, format!("{table} · SELECT * LIMIT 50"), sql);
     }
 

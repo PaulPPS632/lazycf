@@ -113,8 +113,7 @@ impl App {
     }
 
     pub(crate) fn toggle_proxy(&mut self) {
-        let (Some(client), Some(zone_id)) = (self.client(), self.dns.selected_zone_id())
-        else {
+        let (Some(client), Some(zone_id)) = (self.client(), self.dns.selected_zone_id()) else {
             return;
         };
         let Some(record) = self.dns.selected_record() else {

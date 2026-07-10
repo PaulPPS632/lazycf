@@ -2,7 +2,7 @@
 //! wrangler) + URLs prefirmadas S3 (SigV4 manual, requiere credenciales R2).
 
 use color_eyre::eyre::Result;
-use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -32,7 +32,10 @@ fn key_enc(key: &str) -> String {
 /// URL pública de un objeto servido por un dominio (público r2.dev o
 /// personalizado). Conserva `/` en la clave (carpetas virtuales).
 pub fn object_url(domain: &str, key: &str) -> String {
-    format!("https://{domain}/{}", percent_encode(key.as_bytes(), AWS_PATH_ENC))
+    format!(
+        "https://{domain}/{}",
+        percent_encode(key.as_bytes(), AWS_PATH_ENC)
+    )
 }
 
 /// Resultado de listar objetos con `delimiter=/`.
@@ -140,7 +143,11 @@ impl CfClient {
     }
 
     /// `GET .../buckets/{name}/cors` — reglas CORS crudas (vacío si no hay política).
-    pub async fn bucket_cors(&self, account_id: &str, name: &str) -> Result<Vec<serde_json::Value>> {
+    pub async fn bucket_cors(
+        &self,
+        account_id: &str,
+        name: &str,
+    ) -> Result<Vec<serde_json::Value>> {
         #[derive(Deserialize, Default)]
         struct Resp {
             #[serde(default)]
@@ -203,11 +210,13 @@ impl CfClient {
             path.push_str("&delimiter=%2F");
         }
         if let Some(c) = cursor {
-            path.push_str(&format!("&cursor={}", percent_encode(c.as_bytes(), AWS_ENC)));
+            path.push_str(&format!(
+                "&cursor={}",
+                percent_encode(c.as_bytes(), AWS_ENC)
+            ));
         }
         let v = self.get_value(&path).await?;
-        let files: Vec<R2Object> =
-            serde_json::from_value(v["result"].clone()).unwrap_or_default();
+        let files: Vec<R2Object> = serde_json::from_value(v["result"].clone()).unwrap_or_default();
         let folders: Vec<String> = v["result_info"]["delimited"]
             .as_array()
             .map(|a| {
@@ -301,10 +310,7 @@ pub fn presign_get(
     let raw_credential = format!("{access_key}/{scope}");
     let credential = percent_encode(raw_credential.as_bytes(), AWS_ENC);
 
-    let canonical_uri = format!(
-        "/{bucket}/{}",
-        percent_encode(key.as_bytes(), AWS_PATH_ENC)
-    );
+    let canonical_uri = format!("/{bucket}/{}", percent_encode(key.as_bytes(), AWS_PATH_ENC));
     // Parámetros en orden alfabético (requisito de la firma).
     let query = format!(
         "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={credential}\

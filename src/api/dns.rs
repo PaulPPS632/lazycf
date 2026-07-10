@@ -1,7 +1,7 @@
 //! Endpoints de DNS y caché (Fase 1). Vía el caller genérico `CfClient`.
 
 use color_eyre::eyre::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::CfClient;
 use crate::model::{DnsRecord, IdResult, Zone};
@@ -34,7 +34,8 @@ impl CfClient {
 
     /// `POST /zones/{id}/dns_records` — crea un registro.
     pub async fn create_dns_record(&self, zone_id: &str, body: &Value) -> Result<DnsRecord> {
-        self.post(&format!("/zones/{zone_id}/dns_records"), body).await
+        self.post(&format!("/zones/{zone_id}/dns_records"), body)
+            .await
     }
 
     /// `PUT /zones/{id}/dns_records/{rid}` — reemplaza un registro.

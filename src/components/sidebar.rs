@@ -1,9 +1,9 @@
 //! Panel izquierdo: lista navegable de los módulos de Cloudflare.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, List, ListItem, ListState};
-use ratatui::Frame;
 
 use super::{Component, Module};
 use crate::action::Action;

@@ -230,7 +230,10 @@ impl App {
     pub(crate) fn spawn_cleanup(&mut self, tunnel_id: String) {
         self.status = "Limpiando conexiones…".into();
         self.spawn_api(move |client, account_id, tx| async move {
-            let action = match client.cleanup_tunnel_connections(&account_id, &tunnel_id).await {
+            let action = match client
+                .cleanup_tunnel_connections(&account_id, &tunnel_id)
+                .await
+            {
                 Ok(()) => Action::TunnelMutated("Conexiones limpiadas".into()),
                 Err(e) => Action::TunnelError(e.to_string()),
             };
@@ -242,7 +245,9 @@ impl App {
         self.status = "Borrando túnel…".into();
         self.spawn_api(move |client, account_id, tx| async move {
             // Limpiar conexiones primero (si no hay, se ignora el error).
-            let _ = client.cleanup_tunnel_connections(&account_id, &tunnel_id).await;
+            let _ = client
+                .cleanup_tunnel_connections(&account_id, &tunnel_id)
+                .await;
             let action = match client.delete_tunnel(&account_id, &tunnel_id).await {
                 Ok(()) => Action::TunnelMutated("Túnel borrado".into()),
                 Err(e) => Action::TunnelError(e.to_string()),

@@ -2,6 +2,7 @@
 //! lazygit): cada panel encapsula su estado, input y render.
 
 pub mod command_bar;
+pub mod config;
 pub mod d1;
 pub mod detail;
 pub mod dns;
@@ -11,11 +12,12 @@ pub mod queues;
 pub mod r2;
 pub mod sidebar;
 pub mod tunnels;
+pub mod welcome;
 pub mod workers;
 
 use crossterm::event::KeyEvent;
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
 use crate::action::Action;
 

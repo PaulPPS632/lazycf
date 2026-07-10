@@ -2,11 +2,11 @@
 //!   col.2 = lista de túneles (arriba) / detalle: estado, ID, conexiones (abajo)
 //!   col.3 = rutas del túnel (ingress) navegables y editables.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::model::{IngressRule, Tunnel};
 use crate::ui::theme;
@@ -48,8 +48,11 @@ impl TunnelsView {
         self.loading = false;
         self.error = None;
         self.ingress.clear();
-        self.state
-            .select(if self.tunnels.is_empty() { None } else { Some(0) });
+        self.state.select(if self.tunnels.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
     }
 
     pub fn selected(&self) -> Option<&Tunnel> {
@@ -87,7 +90,10 @@ impl TunnelsView {
 
     /// Reglas de ingress con hostname (las editables; excluye la catch-all).
     fn hostname_rules(&self) -> Vec<&IngressRule> {
-        self.ingress.iter().filter(|r| !r.hostname.is_empty()).collect()
+        self.ingress
+            .iter()
+            .filter(|r| !r.hostname.is_empty())
+            .collect()
     }
 
     /// Regla de ingress seleccionada en la lista de rutas.
@@ -151,9 +157,9 @@ impl TunnelsView {
         let block = Block::bordered()
             .title(Line::from(vec![
                 Span::styled(" Túneles (", theme::title(focused)),
-                Span::styled(format!("{up}↑"), Style::default().fg(theme::OK)),
-                Span::styled(" · ", Style::default().fg(theme::DIM)),
-                Span::styled(format!("{down}↓"), Style::default().fg(theme::ERROR)),
+                Span::styled(format!("{up}↑"), Style::default().fg(theme::ok())),
+                Span::styled(" · ", Style::default().fg(theme::dim())),
+                Span::styled(format!("{down}↓"), Style::default().fg(theme::error())),
                 Span::styled(") ", theme::title(focused)),
             ]))
             .border_style(theme::border(focused));
@@ -202,14 +208,14 @@ impl TunnelsView {
 
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(vec![
-            Span::styled("Estado: ", Style::default().fg(theme::DIM)),
+            Span::styled("Estado: ", Style::default().fg(theme::dim())),
             Span::styled(
                 status_label(&tunnel.status),
                 Style::default().fg(status_color(&tunnel.status)),
             ),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("ID: ", Style::default().fg(theme::DIM)),
+            Span::styled("ID: ", Style::default().fg(theme::dim())),
             Span::raw(tunnel.id.clone()),
         ]));
         lines.push(Line::from(""));
@@ -229,7 +235,7 @@ impl TunnelsView {
             }
             lines.push(Line::from(Span::styled(
                 parts.join("  "),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             )));
         }
         lines.push(Line::from(""));
@@ -282,9 +288,9 @@ impl TunnelsView {
                     host.push_str(path);
                 }
                 ListItem::new(Line::from(vec![
-                    Span::styled(host, Style::default().fg(theme::ACCENT)),
-                    Span::styled("  →  ", Style::default().fg(theme::DIM)),
-                    Span::styled(r.service.clone(), Style::default().fg(theme::FG)),
+                    Span::styled(host, Style::default().fg(theme::accent())),
+                    Span::styled("  →  ", Style::default().fg(theme::dim())),
+                    Span::styled(r.service.clone(), Style::default().fg(theme::fg())),
                 ]))
             })
             .collect();
@@ -324,20 +330,20 @@ fn status_rank(status: &str) -> u8 {
 /// Etiqueta corta y coloreada para la lista.
 fn status_tag(status: &str) -> (String, ratatui::style::Color) {
     match status {
-        "healthy" => ("ACTIVO".into(), theme::OK),
-        "degraded" => ("DEGRADADO".into(), theme::WARN),
-        "down" => ("CAÍDO".into(), theme::ERROR),
-        "inactive" => ("INACTIVO".into(), theme::DIM),
-        other => (other.to_uppercase(), theme::DIM),
+        "healthy" => ("ACTIVO".into(), theme::ok()),
+        "degraded" => ("DEGRADADO".into(), theme::warn()),
+        "down" => ("CAÍDO".into(), theme::error()),
+        "inactive" => ("INACTIVO".into(), theme::dim()),
+        other => (other.to_uppercase(), theme::dim()),
     }
 }
 
 fn status_color(status: &str) -> ratatui::style::Color {
     match status {
-        "healthy" => theme::OK,
-        "degraded" => theme::WARN,
-        "down" => theme::ERROR,
-        _ => theme::DIM,
+        "healthy" => theme::ok(),
+        "degraded" => theme::warn(),
+        "down" => theme::error(),
+        _ => theme::dim(),
     }
 }
 

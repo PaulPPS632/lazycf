@@ -401,7 +401,10 @@ impl R2Object {
 
     /// `true` si parece una imagen (por content-type o extensión).
     pub fn is_image(&self) -> bool {
-        if let Some(ct) = self.http_metadata.as_ref().and_then(|m| m.content_type.as_deref())
+        if let Some(ct) = self
+            .http_metadata
+            .as_ref()
+            .and_then(|m| m.content_type.as_deref())
             && ct.starts_with("image/")
         {
             return true;
@@ -554,10 +557,9 @@ mod tests {
     /// familia Queues. Cubre DNS, zonas, túneles y buckets.
     #[test]
     fn null_explicito_tolerado_en_todos_los_modelos() {
-        let zone: Zone = serde_json::from_str(
-            r#"{"id":"z","name":"ej.com","status":null,"account":null}"#,
-        )
-        .expect("Zone tolera status/account null");
+        let zone: Zone =
+            serde_json::from_str(r#"{"id":"z","name":"ej.com","status":null,"account":null}"#)
+                .expect("Zone tolera status/account null");
         assert_eq!(zone.status, "");
         assert!(zone.account_id().is_none());
 
@@ -568,16 +570,14 @@ mod tests {
         assert_eq!(rec.content, "");
         assert_eq!(rec.ttl, 0);
 
-        let tunnel: Tunnel = serde_json::from_str(
-            r#"{"id":"t","name":"tun","status":null,"connections":null}"#,
-        )
-        .expect("Tunnel tolera status/connections null");
+        let tunnel: Tunnel =
+            serde_json::from_str(r#"{"id":"t","name":"tun","status":null,"connections":null}"#)
+                .expect("Tunnel tolera status/connections null");
         assert_eq!(tunnel.status, "");
         assert!(tunnel.connections.is_empty());
 
-        let bucket: R2Bucket =
-            serde_json::from_str(r#"{"name":"b","creation_date":null}"#)
-                .expect("R2Bucket tolera creation_date null");
+        let bucket: R2Bucket = serde_json::from_str(r#"{"name":"b","creation_date":null}"#)
+            .expect("R2Bucket tolera creation_date null");
         assert_eq!(bucket.name, "b");
     }
 

@@ -201,7 +201,7 @@ impl TextInput {
 
     /// Spans de una sola línea con cursor de bloque si `focused`.
     pub fn spans(&self, focused: bool) -> Vec<Span<'static>> {
-        let base = Style::default().fg(theme::FG);
+        let base = Style::default().fg(theme::fg());
         if !focused {
             return vec![Span::styled(self.value.clone(), base)];
         }
@@ -222,7 +222,7 @@ impl TextInput {
 
     /// Líneas del texto (multilínea) con cursor de bloque si `focused`.
     pub fn lines(&self, focused: bool) -> Vec<Line<'static>> {
-        let base = Style::default().fg(theme::FG);
+        let base = Style::default().fg(theme::fg());
         let raw: Vec<&str> = self.value.split('\n').collect();
         if !focused {
             return raw
@@ -282,6 +282,9 @@ mod tests {
 
     #[test]
     fn sin_punto_no_hay_alias() {
-        assert_eq!(TextInput::new("select * from documents").alias_before_cursor(), None);
+        assert_eq!(
+            TextInput::new("select * from documents").alias_before_cursor(),
+            None
+        );
     }
 }

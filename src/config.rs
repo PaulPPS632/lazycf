@@ -16,6 +16,9 @@ pub struct Config {
     /// Zona por defecto al arrancar (zone_id).
     #[serde(default)]
     pub default_zone_id: Option<String>,
+    /// Tema activo por nombre canónico (`cloudflare`/`everforest`/`tokyo-night`).
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -23,6 +26,11 @@ fn config_path() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// `true` si el archivo de config ya existe (detecta el primer arranque).
+    pub fn exists() -> bool {
+        config_path().is_some_and(|p| p.exists())
+    }
+
     /// Carga la config; devuelve `Config::default()` si no existe el archivo.
     pub fn load() -> Result<Self> {
         let Some(path) = config_path() else {
@@ -36,7 +44,6 @@ impl Config {
     }
 
     /// Persiste la config, creando el directorio si hace falta.
-    #[allow(dead_code)] // se usará al guardar cuenta/zona por defecto (Fase 1)
     pub fn save(&self) -> Result<()> {
         let Some(path) = config_path() else {
             return Ok(());
@@ -46,5 +53,27 @@ impl Config {
         }
         let raw = toml::to_string_pretty(self).wrap_err("serializando config")?;
         fs::write(&path, raw).wrap_err("escribiendo config")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_toml_leaves_theme_none() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.theme, None);
+    }
+
+    #[test]
+    fn theme_roundtrips_through_toml() {
+        let cfg = Config {
+            theme: Some("everforest".into()),
+            ..Config::default()
+        };
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.theme.as_deref(), Some("everforest"));
     }
 }

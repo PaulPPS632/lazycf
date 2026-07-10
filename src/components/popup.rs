@@ -1,16 +1,16 @@
 //! Overlays modales: entrada de token, confirmaciones, selector de cuenta y
 //! mensajes. El estado lo posee `app.rs`; aquí van los datos y el render.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::action::Action;
 use crate::components::input::TextInput;
 use crate::model::{Binding, CustomDomain, DnsRecord, PulledMessage, QueueConsumer};
-use crate::ui::widgets::field_row;
+use crate::ui::widgets::{self, field_row};
 use crate::ui::{layout, theme};
 
 /// Popup activo.
@@ -76,10 +76,22 @@ pub enum PromptKind {
 
 impl PromptKind {
     /// `(título, etiqueta, verbo de la pista, pie opcional)`.
-    fn spec(self) -> (&'static str, &'static str, &'static str, Option<&'static str>) {
+    fn spec(
+        self,
+    ) -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+    ) {
         match self {
             PromptKind::NewTunnel => (" 🚇 Nuevo túnel ", "Nombre del nuevo túnel:", "crear", None),
-            PromptKind::NewBucket => (" 📦 Nuevo bucket ", "Nombre del nuevo bucket:", "crear", None),
+            PromptKind::NewBucket => (
+                " 📦 Nuevo bucket ",
+                "Nombre del nuevo bucket:",
+                "crear",
+                None,
+            ),
             PromptKind::NewQueue => (" 📨 Nueva cola ", "Nombre de la nueva cola:", "crear", None),
             PromptKind::NewFolder => (
                 " 📁 Nueva carpeta ",
@@ -322,7 +334,8 @@ impl PeekView {
         }
         let cur = self.state.selected().unwrap_or(0) as i32;
         let n = len as i32;
-        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+        self.state
+            .select(Some(((((cur + delta) % n) + n) % n) as usize));
     }
 
     pub fn selected(&self) -> Option<&PulledMessage> {
@@ -432,7 +445,11 @@ impl BucketDomains {
     pub fn new(bucket: String, rows: Vec<CustomDomain>) -> Self {
         let mut state = ListState::default();
         state.select((!rows.is_empty()).then_some(0));
-        Self { bucket, rows, state }
+        Self {
+            bucket,
+            rows,
+            state,
+        }
     }
 
     pub fn move_by(&mut self, delta: i32) {
@@ -442,7 +459,8 @@ impl BucketDomains {
         }
         let cur = self.state.selected().unwrap_or(0) as i32;
         let n = len as i32;
-        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+        self.state
+            .select(Some(((((cur + delta) % n) + n) % n) as usize));
     }
 
     pub fn selected(&self) -> Option<&CustomDomain> {
@@ -595,7 +613,8 @@ impl ChooseDomain {
         }
         let cur = self.state.selected().unwrap_or(0) as i32;
         let n = len as i32;
-        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+        self.state
+            .select(Some(((((cur + delta) % n) + n) % n) as usize));
     }
 
     pub fn selected(&self) -> Option<&DomainChoice> {
@@ -676,7 +695,11 @@ impl RecordForm {
             type_idx,
             name: TextInput::new(r.name.clone()),
             content: TextInput::new(r.content.clone()),
-            priority: TextInput::new(r.priority.map(|p| p.to_string()).unwrap_or_else(|| "10".into())),
+            priority: TextInput::new(
+                r.priority
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "10".into()),
+            ),
             proxied: r.proxied == Some(true),
             ttl: TextInput::new(r.ttl.to_string()),
             field: 0,
@@ -979,7 +1002,8 @@ impl AccountPicker {
         }
         let cur = self.state.selected().unwrap_or(0) as i32;
         let n = len as i32;
-        self.state.select(Some(((((cur + delta) % n) + n) % n) as usize));
+        self.state
+            .select(Some(((((cur + delta) % n) + n) % n) as usize));
     }
     pub fn selected_row(&self) -> Option<&AccountRow> {
         self.state.selected().and_then(|i| self.rows.get(i))
@@ -1034,7 +1058,7 @@ fn draw_log_detail(frame: &mut Frame, area: Rect, d: &LogDetail) {
     let lines: Vec<Line> = d
         .lines
         .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme::FG))))
+        .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme::fg()))))
         .collect();
     let body = Paragraph::new(lines).block(block).scroll((d.scroll, 0));
     frame.render_widget(body, rect);
@@ -1055,14 +1079,25 @@ fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {
         lines.push(field_row("Nombre", &b.name, b.field == 0, 10));
     } else {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10}", "Nombre"), Style::default().fg(theme::DIM)),
-            Span::styled(b.name.value().to_string(), Style::default().fg(theme::FG)),
+            Span::styled(
+                format!("  {:<10}", "Nombre"),
+                Style::default().fg(theme::dim()),
+            ),
+            Span::styled(b.name.value().to_string(), Style::default().fg(theme::fg())),
         ]));
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10}", "Tipo"), Style::default().fg(theme::DIM)),
             Span::styled(
-                if b.is_secret { "secret_text" } else { "plain_text" }.to_string(),
-                Style::default().fg(theme::FG),
+                format!("  {:<10}", "Tipo"),
+                Style::default().fg(theme::dim()),
+            ),
+            Span::styled(
+                if b.is_secret {
+                    "secret_text"
+                } else {
+                    "plain_text"
+                }
+                .to_string(),
+                Style::default().fg(theme::fg()),
             ),
         ]));
     }
@@ -1071,18 +1106,18 @@ fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {
 
     lines.push(Line::from(""));
     let hint = if b.submitting {
-        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Guardando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &b.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else if b.is_secret {
         Span::styled(
             "Enter guardar · Esc cancelar · el valor no se muestra tras guardar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     } else {
         Span::styled(
             "↑↓ campo · Enter guardar · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     lines.push(Line::from(hint));
@@ -1101,18 +1136,23 @@ fn draw_binding_edit(frame: &mut Frame, area: Rect, b: &BindingEdit) {
     frame.render_widget(body, rect);
 }
 
-
 fn draw_http_test(frame: &mut Frame, area: Rect, t: &HttpTest) {
     let rect = layout::centered(area, 74, 8);
     frame.render_widget(Clear, rect);
     let status: Line = if t.sending {
-        Line::from(Span::styled("Enviando…", Style::default().fg(theme::ACCENT)))
+        Line::from(Span::styled(
+            "Enviando…",
+            Style::default().fg(theme::accent()),
+        ))
     } else if let Some(e) = &t.error {
-        Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR)))
+        Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        ))
     } else {
         Line::from(Span::styled(
             "Enter enviar GET · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))
     };
     let body = Paragraph::new(vec![
@@ -1136,19 +1176,25 @@ fn draw_upload(frame: &mut Frame, area: Rect, u: &UploadForm) {
     let rect = layout::centered(area, 76, 9);
     frame.render_widget(Clear, rect);
     let status: Line = if u.submitting {
-        Line::from(Span::styled("Subiendo…", Style::default().fg(theme::ACCENT)))
+        Line::from(Span::styled(
+            "Subiendo…",
+            Style::default().fg(theme::accent()),
+        ))
     } else if let Some(e) = &u.error {
-        Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR)))
+        Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        ))
     } else {
         Line::from(Span::styled(
             "Enter subir · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))
     };
     let body = Paragraph::new(vec![
         Line::from(Span::styled(
             format!("Destino: {}", u.dest),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         Line::from(""),
         Line::from("Ruta del archivo local:"),
@@ -1175,20 +1221,27 @@ fn draw_rename(frame: &mut Frame, area: Rect, r: &RenameForm) {
     } else {
         r.old_key.rsplit('/').next().unwrap_or(&r.old_key)
     };
-    let verb = if r.move_mode { "Moviendo…" } else { "Renombrando…" };
+    let verb = if r.move_mode {
+        "Moviendo…"
+    } else {
+        "Renombrando…"
+    };
     let status: Line = if r.submitting {
-        Line::from(Span::styled(verb, Style::default().fg(theme::ACCENT)))
+        Line::from(Span::styled(verb, Style::default().fg(theme::accent())))
     } else if let Some(e) = &r.error {
-        Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR)))
+        Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        ))
     } else if r.move_mode {
         Line::from(Span::styled(
             "Enter mover · Esc cancelar · sobrescribe si el destino ya existe fuera de lo listado",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))
     } else {
         Line::from(Span::styled(
             "Enter renombrar · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))
     };
     let label = if r.move_mode {
@@ -1199,7 +1252,7 @@ fn draw_rename(frame: &mut Frame, area: Rect, r: &RenameForm) {
     let body = Paragraph::new(vec![
         Line::from(Span::styled(
             format!("Actual: {shown_old}"),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         Line::from(""),
         Line::from(label),
@@ -1225,27 +1278,35 @@ fn draw_r2_creds(frame: &mut Frame, area: Rect, c: &R2CredsForm) {
     let rect = layout::centered(area, 76, 11);
     frame.render_widget(Clear, rect);
     let status: Line = match &c.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        Some(e) => Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        )),
         None => Line::from(Span::styled(
             "↑↓ campo · Enter guardar · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
     };
     let field = |label: &str, input: &TextInput, active: bool, mask: bool| -> Line<'static> {
         let marker = if active { "▶ " } else { "  " };
         let style = if active {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::dim())
         };
         let mut spans = vec![Span::styled(format!("{marker}{label:<12}"), style)];
         if mask {
             spans.push(Span::styled(
                 "•".repeat(input.value().chars().count()),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             ));
             if active {
-                spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(
+                    " ",
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
             }
         } else {
             spans.extend(input.spans(active));
@@ -1255,7 +1316,7 @@ fn draw_r2_creds(frame: &mut Frame, area: Rect, c: &R2CredsForm) {
     let body = Paragraph::new(vec![
         Line::from(Span::styled(
             "Credenciales R2 (API Token S3 → se guardan en el keyring):",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         Line::from(""),
         field("Access Key", &c.access_key, c.field == 0, false),
@@ -1263,7 +1324,7 @@ fn draw_r2_creds(frame: &mut Frame, area: Rect, c: &R2CredsForm) {
         Line::from(""),
         Line::from(Span::styled(
             "Créalas en dash.cloudflare.com → R2 → Manage API Tokens",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         status,
     ])
@@ -1281,22 +1342,26 @@ fn draw_presign(frame: &mut Frame, area: Rect, p: &PresignForm) {
     let rect = layout::centered(area, 70, 9);
     frame.render_widget(Clear, rect);
     let status: Line = match &p.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        Some(e) => Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        )),
         None => Line::from(Span::styled(
             "Enter generar · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
     };
     let name = p.key.rsplit('/').next().unwrap_or(&p.key);
     let body = Paragraph::new(vec![
         Line::from(Span::styled(
             format!("Objeto: {name}"),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Expira en (segundos, máx 604800): ", Style::default().fg(theme::FG)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Expira en (segundos, máx 604800): ",
+            Style::default().fg(theme::fg()),
+        )]),
         Line::from(p.expires.spans(true)),
         Line::from(""),
         status,
@@ -1333,10 +1398,13 @@ fn draw_text_prompt(frame: &mut Frame, area: Rect, p: &TextPrompt) {
     let rect = layout::centered(area, 62, height);
     frame.render_widget(Clear, rect);
     let status: Line = match &p.error {
-        Some(e) => Line::from(Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))),
+        Some(e) => Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        )),
         None => Line::from(Span::styled(
             format!("Enter {verb} · Esc cancelar"),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
     };
     let mut lines = vec![
@@ -1346,7 +1414,10 @@ fn draw_text_prompt(frame: &mut Frame, area: Rect, p: &TextPrompt) {
         Line::from(""),
     ];
     if let Some(f) = footer {
-        lines.push(Line::from(Span::styled(f, Style::default().fg(theme::DIM))));
+        lines.push(Line::from(Span::styled(
+            f,
+            Style::default().fg(theme::dim()),
+        )));
     }
     lines.push(status);
     let body = Paragraph::new(lines)
@@ -1388,21 +1459,29 @@ fn draw_send_message(frame: &mut Frame, area: Rect, f: &SendMessageForm) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "Cuerpo del mensaje:",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))),
         rows[0],
     );
-    frame.render_widget(Paragraph::new(f.body.lines(cur == SendField::Body)), rows[1]);
+    frame.render_widget(
+        Paragraph::new(f.body.lines(cur == SendField::Body)),
+        rows[1],
+    );
 
     let ct_active = cur == SendField::ContentType;
     let ct_style = if ct_active {
-        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme::accent())
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::FG)
+        Style::default().fg(theme::fg())
     };
     let ct_line = Line::from(vec![
         Span::styled(if ct_active { "▶ " } else { "  " }, ct_style),
-        Span::styled(format!("{:<14}", "Content-Type"), Style::default().fg(theme::DIM)),
+        Span::styled(
+            format!("{:<14}", "Content-Type"),
+            Style::default().fg(theme::dim()),
+        ),
         Span::styled(
             if ct_active {
                 format!("‹ {} ›", f.content_type())
@@ -1416,20 +1495,26 @@ fn draw_send_message(frame: &mut Frame, area: Rect, f: &SendMessageForm) {
 
     let delay_active = cur == SendField::Delay;
     let mut delay_spans = vec![
-        Span::styled(if delay_active { "▶ " } else { "  " }, Style::default().fg(theme::DIM)),
-        Span::styled(format!("{:<14}", "Delay (s)"), Style::default().fg(theme::DIM)),
+        Span::styled(
+            if delay_active { "▶ " } else { "  " },
+            Style::default().fg(theme::dim()),
+        ),
+        Span::styled(
+            format!("{:<14}", "Delay (s)"),
+            Style::default().fg(theme::dim()),
+        ),
     ];
     delay_spans.extend(f.delay.spans(delay_active));
     frame.render_widget(Paragraph::new(Line::from(delay_spans)), rows[3]);
 
     let hint = if f.submitting {
-        Span::styled("Enviando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Enviando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &f.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else {
         Span::styled(
             "Tab campo · Ctrl+Enter/F5 enviar · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     frame.render_widget(Paragraph::new(Line::from(hint)), rows[4]);
@@ -1440,9 +1525,11 @@ fn draw_consumer_edit(frame: &mut Frame, area: Rect, f: &ConsumerEditForm) {
     let field_row = |label: &str, input: &TextInput, active: bool| -> Line<'static> {
         let marker = if active { "▶ " } else { "  " };
         let label_style = if active {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::dim())
         };
         let mut spans = vec![Span::styled(format!("{marker}{label:<22}"), label_style)];
         spans.extend(input.spans(active));
@@ -1454,9 +1541,13 @@ fn draw_consumer_edit(frame: &mut Frame, area: Rect, f: &ConsumerEditForm) {
             format!(
                 "Consumer: {} {}",
                 f.ctype,
-                if f.script_name.is_empty() { "—" } else { &f.script_name }
+                if f.script_name.is_empty() {
+                    "—"
+                } else {
+                    &f.script_name
+                }
             ),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         Line::from(""),
     ];
@@ -1477,13 +1568,13 @@ fn draw_consumer_edit(frame: &mut Frame, area: Rect, f: &ConsumerEditForm) {
 
     lines.push(Line::from(""));
     let hint = if f.submitting {
-        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Guardando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &f.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else {
         Span::styled(
             "Tab campo · Enter guardar · Esc cancelar · vacío = sin cambio",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     lines.push(Line::from(hint));
@@ -1512,7 +1603,7 @@ fn draw_peek_view(frame: &mut Frame, area: Rect, v: &mut PeekView) {
     if v.messages.is_empty() {
         let body = Paragraph::new("Sin mensajes disponibles")
             .block(block)
-            .style(Style::default().fg(theme::DIM));
+            .style(Style::default().fg(theme::dim()));
         frame.render_widget(body, rect);
         return;
     }
@@ -1531,7 +1622,10 @@ fn draw_peek_view(frame: &mut Frame, area: Rect, v: &mut PeekView) {
                 m.attempts,
                 m.id.chars().take(8).collect::<String>()
             );
-            ListItem::new(Line::from(Span::styled(text, Style::default().fg(theme::FG))))
+            ListItem::new(Line::from(Span::styled(
+                text,
+                Style::default().fg(theme::fg()),
+            )))
         })
         .collect();
     let list = List::new(items)
@@ -1540,7 +1634,6 @@ fn draw_peek_view(frame: &mut Frame, area: Rect, v: &mut PeekView) {
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, rect, &mut v.state);
 }
-
 
 fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
     let visible = f.visible();
@@ -1555,9 +1648,11 @@ fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
         let active = f.current() == *field;
         let marker = if active { "▶ " } else { "  " };
         let label_style = if active {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::dim())
         };
 
         let (label, value): (&str, Vec<Span>) = match field {
@@ -1566,10 +1661,15 @@ fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
                 if active {
                     vec![Span::styled(
                         format!("‹ {} ›", f.rtype()),
-                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme::accent())
+                            .add_modifier(Modifier::BOLD),
                     )]
                 } else {
-                    vec![Span::styled(f.rtype().to_string(), Style::default().fg(theme::FG))]
+                    vec![Span::styled(
+                        f.rtype().to_string(),
+                        Style::default().fg(theme::fg()),
+                    )]
                 },
             ),
             RField::Name => ("Nombre", f.name.spans(active)),
@@ -1578,16 +1678,16 @@ fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
             RField::Proxy => (
                 "Proxy",
                 if f.proxied {
-                    vec![Span::styled("● on", Style::default().fg(theme::ACCENT))]
+                    vec![Span::styled("● on", Style::default().fg(theme::accent()))]
                 } else {
-                    vec![Span::styled("○ off", Style::default().fg(theme::DIM))]
+                    vec![Span::styled("○ off", Style::default().fg(theme::dim()))]
                 },
             ),
             // TTL: si no está activo y vale "1", muestra "1 (auto)"; si no, editable.
             RField::Ttl => (
                 "TTL",
                 if !active && f.ttl.value() == "1" {
-                    vec![Span::styled("1 (auto)", Style::default().fg(theme::FG))]
+                    vec![Span::styled("1 (auto)", Style::default().fg(theme::fg()))]
                 } else {
                     f.ttl.spans(active)
                 },
@@ -1601,13 +1701,13 @@ fn draw_record_form(frame: &mut Frame, area: Rect, f: &RecordForm) {
 
     lines.push(Line::from(""));
     let hint = if f.submitting {
-        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Guardando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &f.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else {
         Span::styled(
             "↑↓ campo · ←→ tipo · Espacio proxy · Enter guardar · Esc",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     lines.push(Line::from(hint));
@@ -1629,9 +1729,11 @@ fn draw_route_form(frame: &mut Frame, area: Rect, f: &RouteForm) {
     let row = |label: &str, value: Vec<Span<'static>>, active: bool| -> Line<'static> {
         let marker = if active { "▶ " } else { "  " };
         let label_style = if active {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::dim())
         };
         let mut spans = vec![Span::styled(format!("{marker}{label:<11}"), label_style)];
         spans.extend(value);
@@ -1641,7 +1743,10 @@ fn draw_route_form(frame: &mut Frame, area: Rect, f: &RouteForm) {
     let text_field = |label: &str, input: &TextInput, ph: &str, fld: RouteField| -> Line<'static> {
         let active = cur == fld;
         let value = if input.value().is_empty() && !active {
-            vec![Span::styled(ph.to_string(), Style::default().fg(theme::DIM))]
+            vec![Span::styled(
+                ph.to_string(),
+                Style::default().fg(theme::dim()),
+            )]
         } else {
             input.spans(active)
         };
@@ -1652,14 +1757,14 @@ fn draw_route_form(frame: &mut Frame, area: Rect, f: &RouteForm) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("Túnel: {}", f.tunnel_name),
-        Style::default().fg(theme::DIM),
+        Style::default().fg(theme::dim()),
     )));
 
     if let Some(host) = &f.editing {
         // Edición: hostname fijo (solo servicio y ruta cambian).
         lines.push(Line::from(vec![
-            Span::styled("  Host        ", Style::default().fg(theme::DIM)),
-            Span::styled(host.clone(), Style::default().fg(theme::ACCENT)),
+            Span::styled("  Host        ", Style::default().fg(theme::dim())),
+            Span::styled(host.clone(), Style::default().fg(theme::accent())),
         ]));
     } else {
         lines.push(text_field(
@@ -1673,25 +1778,35 @@ fn draw_route_form(frame: &mut Frame, area: Rect, f: &RouteForm) {
         let domain_val = match f.zone() {
             Some(z) if domain_active => vec![Span::styled(
                 format!("‹ {} ›", z.name),
-                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD),
             )],
-            Some(z) => vec![Span::styled(z.name.clone(), Style::default().fg(theme::FG))],
+            Some(z) => vec![Span::styled(
+                z.name.clone(),
+                Style::default().fg(theme::fg()),
+            )],
             None => vec![Span::styled(
                 "(sin zonas en la cuenta)",
-                Style::default().fg(theme::ERROR),
+                Style::default().fg(theme::error()),
             )],
         };
         lines.push(row("Dominio", domain_val, domain_active));
         // Nombre de host completo (calculado).
         lines.push(Line::from(vec![
-            Span::styled("  Host completo ", Style::default().fg(theme::DIM)),
+            Span::styled("  Host completo ", Style::default().fg(theme::dim())),
             Span::styled(
                 f.full_hostname().unwrap_or_else(|| "—".into()),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
         ]));
     }
-    lines.push(text_field("Ruta", &f.path, "^/blog (opcional)", RouteField::Path));
+    lines.push(text_field(
+        "Ruta",
+        &f.path,
+        "^/blog (opcional)",
+        RouteField::Path,
+    ));
     lines.push(text_field(
         "Servicio",
         &f.service,
@@ -1701,18 +1816,18 @@ fn draw_route_form(frame: &mut Frame, area: Rect, f: &RouteForm) {
 
     lines.push(Line::from(""));
     let hint = if f.submitting {
-        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Guardando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &f.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else if editing {
         Span::styled(
             "↑↓ campo · Enter guardar · Esc",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     } else {
         Span::styled(
             "↑↓ campo · ←→ dominio · Enter guardar · Esc",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     lines.push(Line::from(hint));
@@ -1743,21 +1858,26 @@ fn draw_help(frame: &mut Frame, area: Rect, help: &Help) {
         if i > 0 {
             lines.push(Line::from(""));
         }
-        lines.push(Line::from(Span::styled(sec.title.clone(), theme::title(true))));
+        lines.push(Line::from(Span::styled(
+            sec.title.clone(),
+            theme::title(true),
+        )));
         for (keys, desc) in &sec.items {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {keys:<14}"),
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(desc.clone(), Style::default().fg(theme::FG)),
+                Span::styled(desc.clone(), Style::default().fg(theme::fg())),
             ]));
         }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Cualquier tecla para cerrar",
-        Style::default().fg(theme::DIM),
+        Style::default().fg(theme::dim()),
     )));
 
     let height = (lines.len() as u16 + 2).min(area.height);
@@ -1778,11 +1898,11 @@ fn draw_token(frame: &mut Frame, area: Rect, entry: &TokenEntry) {
 
     // Flujo OAuth en vuelo: estado de espera + URL de fallback.
     if entry.oauth_in_progress {
-        let dim = Style::default().fg(theme::DIM);
+        let dim = Style::default().fg(theme::dim());
         let mut lines = vec![
             Line::from(Span::styled(
                 "Esperando autorización en el navegador…",
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             )),
             Line::from(""),
             Line::from("Aprueba el acceso en la pestaña que se acaba de abrir."),
@@ -1811,11 +1931,17 @@ fn draw_token(frame: &mut Frame, area: Rect, entry: &TokenEntry) {
 
     // Pantalla por defecto: login OAuth como método principal.
     if !entry.manual {
-        let dim = Style::default().fg(theme::DIM);
+        let dim = Style::default().fg(theme::dim());
         let status: Line = if entry.verifying {
-            Line::from(Span::styled("Verificando…", Style::default().fg(theme::ACCENT)))
+            Line::from(Span::styled(
+                "Verificando…",
+                Style::default().fg(theme::accent()),
+            ))
         } else if let Some(err) = &entry.error {
-            Line::from(Span::styled(format!("✗ {err}"), Style::default().fg(theme::ERROR)))
+            Line::from(Span::styled(
+                format!("✗ {err}"),
+                Style::default().fg(theme::error()),
+            ))
         } else {
             Line::from(Span::styled(
                 "Enter iniciar sesión · t API token · Ctrl-C salir",
@@ -1827,10 +1953,15 @@ fn draw_token(frame: &mut Frame, area: Rect, entry: &TokenEntry) {
             Line::from(""),
             Line::from(Span::styled(
                 "  Enter  →  Iniciar sesión con Cloudflare (abre el navegador)",
-                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(Span::styled("  t      →  usar un API token en su lugar", dim)),
+            Line::from(Span::styled(
+                "  t      →  usar un API token en su lugar",
+                dim,
+            )),
             Line::from(""),
             status,
         ])
@@ -1846,40 +1977,34 @@ fn draw_token(frame: &mut Frame, area: Rect, entry: &TokenEntry) {
     }
 
     // Token enmascarado con cursor de bloque en su posición.
-    let n = entry.input.value().chars().count();
-    let cur = entry.input.cursor().min(n);
-    let bold = Style::default().fg(theme::FG).add_modifier(Modifier::BOLD);
-    let (at, after) = if cur < n {
-        ("•".to_string(), "•".repeat(n - cur - 1))
-    } else {
-        (" ".to_string(), String::new())
-    };
-    let masked_line = Line::from(vec![
-        Span::styled("•".repeat(cur), bold),
-        Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)),
-        Span::styled(after, bold),
-    ]);
+    let masked_line = Line::from(widgets::masked_input_spans(&entry.input, true));
     let status: Line = if entry.verifying {
-        Line::from(Span::styled("Verificando…", Style::default().fg(theme::ACCENT)))
+        Line::from(Span::styled(
+            "Verificando…",
+            Style::default().fg(theme::accent()),
+        ))
     } else if let Some(err) = &entry.error {
         Line::from(Span::styled(
             format!("✗ {err}"),
-            Style::default().fg(theme::ERROR),
+            Style::default().fg(theme::error()),
         ))
     } else {
         Line::from(Span::styled(
             "Enter verificar · Ctrl-O dashboard · Esc volver · Ctrl-C salir",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))
     };
 
-    let dim = Style::default().fg(theme::DIM);
+    let dim = Style::default().fg(theme::dim());
     let body = Paragraph::new(vec![
         Line::from("Pega tu API Token de Cloudflare:"),
         Line::from(""),
         masked_line,
         Line::from(""),
-        Line::from(Span::styled("Crea un Custom Token con estos permisos:", dim)),
+        Line::from(Span::styled(
+            "Crea un Custom Token con estos permisos:",
+            dim,
+        )),
         Line::from(Span::styled(
             "  Zone:  DNS·Edit · Cache Purge · Zone·Read · Analytics·Read",
             dim,
@@ -1905,18 +2030,25 @@ fn draw_confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
     let rect = layout::centered(area, 60, 8);
     frame.render_widget(Clear, rect);
     let body = Paragraph::new(vec![
-        Line::from(Span::styled(c.body.clone(), Style::default().fg(theme::FG))),
+        Line::from(Span::styled(
+            c.body.clone(),
+            Style::default().fg(theme::fg()),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "s/Enter confirmar · n/Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
     ])
     .block(
         Block::bordered()
             .title(format!(" {} ", c.title))
-            .border_style(Style::default().fg(theme::ERROR))
-            .title_style(Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)),
+            .border_style(Style::default().fg(theme::error()))
+            .title_style(
+                Style::default()
+                    .fg(theme::error())
+                    .add_modifier(Modifier::BOLD),
+            ),
     )
     .wrap(Wrap { trim: true });
     frame.render_widget(body, rect);
@@ -1938,18 +2070,21 @@ fn draw_cors_edit(frame: &mut Frame, area: Rect, c: &CorsEditForm) {
 
     let rows = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([ratatui::layout::Constraint::Min(1), ratatui::layout::Constraint::Length(1)])
+        .constraints([
+            ratatui::layout::Constraint::Min(1),
+            ratatui::layout::Constraint::Length(1),
+        ])
         .split(inner);
     frame.render_widget(Paragraph::new(c.json.lines(true)), rows[0]);
 
     let hint = if c.submitting {
-        Span::styled("Guardando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Guardando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &c.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else {
         Span::styled(
             "Ctrl+Enter / F5 guardar · Esc cancelar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     frame.render_widget(Paragraph::new(Line::from(hint)), rows[1]);
@@ -1960,13 +2095,24 @@ fn draw_choose_domain(frame: &mut Frame, area: Rect, c: &mut ChooseDomain) {
     let rect = layout::centered(area, 66, h);
     frame.render_widget(Clear, rect);
     let (title, bottom) = match c.purpose {
-        ChoosePurpose::Abrir => (" Abrir objeto — elige dominio ", " Enter abrir · Esc cancelar "),
-        ChoosePurpose::Copiar => (" Copiar URL — elige dominio ", " Enter copiar · Esc cancelar "),
+        ChoosePurpose::Abrir => (
+            " Abrir objeto — elige dominio ",
+            " Enter abrir · Esc cancelar ",
+        ),
+        ChoosePurpose::Copiar => (
+            " Copiar URL — elige dominio ",
+            " Enter copiar · Esc cancelar ",
+        ),
     };
     let items: Vec<ListItem> = c
         .choices
         .iter()
-        .map(|d| ListItem::new(Line::from(Span::styled(d.label.clone(), Style::default().fg(theme::FG)))))
+        .map(|d| {
+            ListItem::new(Line::from(Span::styled(
+                d.label.clone(),
+                Style::default().fg(theme::fg()),
+            )))
+        })
         .collect();
     let list = List::new(items)
         .block(
@@ -1993,7 +2139,7 @@ fn draw_bucket_domains(frame: &mut Frame, area: Rect, d: &mut BucketDomains) {
     if d.rows.is_empty() {
         let body = Paragraph::new("Sin dominios personalizados · pulsa 'a' para conectar uno")
             .block(block)
-            .style(Style::default().fg(theme::DIM))
+            .style(Style::default().fg(theme::dim()))
             .wrap(Wrap { trim: true });
         frame.render_widget(body, rect);
         return;
@@ -2003,9 +2149,9 @@ fn draw_bucket_domains(frame: &mut Frame, area: Rect, d: &mut BucketDomains) {
         .iter()
         .map(|dom| {
             let (text, color) = if dom.enabled {
-                (dom.domain.clone(), theme::FG)
+                (dom.domain.clone(), theme::fg())
             } else {
-                (format!("{} (deshabilitado)", dom.domain), theme::DIM)
+                (format!("{} (deshabilitado)", dom.domain), theme::dim())
             };
             ListItem::new(Line::from(Span::styled(text, Style::default().fg(color))))
         })
@@ -2021,9 +2167,11 @@ fn draw_domain_add(frame: &mut Frame, area: Rect, f: &DomainAddForm) {
     let row = |label: &str, value: Vec<Span<'static>>, active: bool| -> Line<'static> {
         let marker = if active { "▶ " } else { "  " };
         let label_style = if active {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::dim())
         };
         let mut spans = vec![Span::styled(format!("{marker}{label:<11}"), label_style)];
         spans.extend(value);
@@ -2034,7 +2182,7 @@ fn draw_domain_add(frame: &mut Frame, area: Rect, f: &DomainAddForm) {
     let sub_val = if f.subdomain.value().is_empty() && !sub_active {
         vec![Span::styled(
             "assets, cdn (vacío = apex)".to_string(),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )]
     } else {
         f.subdomain.spans(sub_active)
@@ -2043,39 +2191,44 @@ fn draw_domain_add(frame: &mut Frame, area: Rect, f: &DomainAddForm) {
     let zone_val = match f.zone() {
         Some(z) if zone_active => vec![Span::styled(
             format!("‹ {} ›", z.name),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
         )],
-        Some(z) => vec![Span::styled(z.name.clone(), Style::default().fg(theme::FG))],
+        Some(z) => vec![Span::styled(
+            z.name.clone(),
+            Style::default().fg(theme::fg()),
+        )],
         None => vec![Span::styled(
             "(sin zonas en la cuenta)".to_string(),
-            Style::default().fg(theme::ERROR),
+            Style::default().fg(theme::error()),
         )],
     };
 
     let mut lines = vec![
         Line::from(Span::styled(
             format!("Bucket: {}", f.bucket),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         row("Subdominio", sub_val, sub_active),
         row("Dominio", zone_val, zone_active),
         Line::from(vec![
-            Span::styled("  Host completo ", Style::default().fg(theme::DIM)),
+            Span::styled("  Host completo ", Style::default().fg(theme::dim())),
             Span::styled(
                 f.full_domain().unwrap_or_else(|| "—".into()),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
         ]),
         Line::from(""),
     ];
     let hint = if f.submitting {
-        Span::styled("Conectando…", Style::default().fg(theme::ACCENT))
+        Span::styled("Conectando…", Style::default().fg(theme::accent()))
     } else if let Some(e) = &f.error {
-        Span::styled(format!("✗ {e}"), Style::default().fg(theme::ERROR))
+        Span::styled(format!("✗ {e}"), Style::default().fg(theme::error()))
     } else {
         Span::styled(
             "↑↓ campo · ←→ dominio · Enter conectar · Esc",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )
     };
     lines.push(Line::from(hint));
@@ -2104,9 +2257,9 @@ fn draw_account_picker(frame: &mut Frame, area: Rect, p: &mut AccountPicker) {
         .map(|r| {
             let marker = if r.active { "● " } else { "  " };
             let style = if r.active {
-                Style::default().fg(theme::ACCENT)
+                Style::default().fg(theme::accent())
             } else {
-                Style::default().fg(theme::FG)
+                Style::default().fg(theme::fg())
             };
             ListItem::new(Line::from(Span::styled(
                 format!("{marker}{}", r.label),
@@ -2122,7 +2275,7 @@ fn draw_account_picker(frame: &mut Frame, area: Rect, p: &mut AccountPicker) {
     if p.rows.is_empty() {
         let body = Paragraph::new("Sin cuentas · pulsa 'a' para añadir un token")
             .block(block)
-            .style(Style::default().fg(theme::DIM));
+            .style(Style::default().fg(theme::dim()));
         frame.render_widget(body, rect);
         return;
     }
@@ -2144,13 +2297,20 @@ fn draw_message(frame: &mut Frame, area: Rect, msg: &Message) {
         .sum();
     let rect = layout::centered(area, width, (body_rows as u16 + 5).clamp(8, area.height));
     frame.render_widget(Clear, rect);
-    let color = if msg.is_error { theme::ERROR } else { theme::ACCENT };
+    let color = if msg.is_error {
+        theme::error()
+    } else {
+        theme::accent()
+    };
     let body = Paragraph::new(vec![
-        Line::from(Span::styled(msg.body.clone(), Style::default().fg(theme::FG))),
+        Line::from(Span::styled(
+            msg.body.clone(),
+            Style::default().fg(theme::fg()),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "Enter/Esc para cerrar",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
     ])
     .block(

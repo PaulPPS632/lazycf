@@ -11,29 +11,33 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::action::Action;
 use crate::api::CfClient;
 use crate::components::command_bar::CommandBar;
+use crate::components::config::{ConfigFocus, ConfigSection, ConfigView};
 use crate::components::d1::D1View;
 use crate::components::detail::Detail;
 use crate::components::dns::DnsView;
 use crate::components::input::TextInput;
 use crate::components::popup::{
-    AccountPicker, AccountRow, BindingEdit, BucketDomains, ChooseDomain, ChoosePurpose,
-    ConsumerEditForm, Confirm, CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection,
-    HttpTest, ImageView, LogDetail, Message, PeekView, Popup, PresignForm, PromptKind,
-    R2CredsForm, RField, RecordForm, RenameForm, RouteField, RouteForm, SendField,
-    SendMessageForm, TextPrompt, TokenEntry, UploadForm, ZoneRef,
+    AccountPicker, AccountRow, BindingEdit, BucketDomains, ChooseDomain, ChoosePurpose, Confirm,
+    ConsumerEditForm, CorsEditForm, DomainAddForm, DomainChoice, Help, HelpSection, HttpTest,
+    ImageView, LogDetail, Message, PeekView, Popup, PresignForm, PromptKind, R2CredsForm, RField,
+    RecordForm, RenameForm, RouteField, RouteForm, SendField, SendMessageForm, TextPrompt,
+    TokenEntry, UploadForm, ZoneRef,
 };
 use crate::components::queues::QueuesView;
 use crate::components::r2::{BucketInfo, Entry, R2View};
 use crate::components::sidebar::Sidebar;
 use crate::components::tunnels::TunnelsView;
+use crate::components::welcome::{WelcomeFocus, WelcomeStep, WelcomeView};
 use crate::components::workers::WorkersView;
-use crate::ui::Loadable;
 use crate::components::{Component, Module};
 use crate::config::Config;
 use crate::event::{Event, EventHandler};
 use crate::model::{Account, Zone};
 use crate::secrets;
+use crate::ui::Loadable;
 use crate::ui::layout;
+use crate::ui::theme;
+use crate::ui::widgets;
 
 // Métodos de `App` por módulo (bloques `impl App` en archivos separados).
 // El núcleo transversal (event loop, foco, popups, dispatch, draw, sesiones)
@@ -49,6 +53,7 @@ mod workers;
 enum Screen {
     Auth,
     Main,
+    Config,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +134,12 @@ pub struct App {
     oauth_task: Option<tokio::task::AbortHandle>,
     config: Config,
     status: String,
+    /// `true` si no existía `config.toml` al arrancar: tras el primer login
+    /// exitoso dispara el paso de tema de la bienvenida (`WelcomeStep::Theme`).
+    first_run: bool,
+    /// Pantalla de bienvenida (login OAuth/token + tema del primer arranque).
+    /// Activa mientras `screen == Screen::Auth`.
+    welcome: WelcomeView,
 
     // DNS.
     all_zones: Vec<Zone>,
@@ -164,6 +175,10 @@ pub struct App {
     command_bar: CommandBar,
     popup: Option<Popup>,
 
+    // Pantalla de configuración (tecla `,`).
+    config_view: ConfigView,
+    rect_config_sections: Option<Rect>,
+
     // Rects del último frame (para hit-testing del mouse).
     rect_sidebar: Rect,
     rect_zones: Option<Rect>,
@@ -187,7 +202,16 @@ pub struct App {
 impl App {
     pub fn new() -> Result<Self> {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
+        // Capturar ANTES de load: sin config.toml es el primer arranque.
+        let first_run = !Config::exists();
         let config = Config::load().unwrap_or_default();
+        theme::set(
+            config
+                .theme
+                .as_deref()
+                .and_then(theme::index_of)
+                .unwrap_or(0),
+        );
         let events = EventHandler::new(4.0, 60.0);
 
         let mut app = Self {
@@ -205,6 +229,8 @@ impl App {
             oauth_task: None,
             config,
             status: String::new(),
+            first_run,
+            welcome: WelcomeView::new(),
             all_zones: Vec::new(),
             dns: DnsView::new(),
             tunnels: TunnelsView::new(),
@@ -220,6 +246,8 @@ impl App {
             detail: Detail::new(),
             command_bar: CommandBar,
             popup: None,
+            config_view: ConfigView::new(),
+            rect_config_sections: None,
             rect_sidebar: Rect::default(),
             rect_zones: None,
             rect_records: None,
@@ -239,32 +267,47 @@ impl App {
             rect_r2_filter: None,
         };
 
+        app.begin_auth();
+
+        Ok(app)
+    }
+
+    /// Arranca el flujo de autenticación en la pantalla de bienvenida:
+    /// verifica las credenciales guardadas (sin auto-OAuth) o, si no hay
+    /// ninguna, auto-inicia OAuth. El envío por canal (en vez de llamar
+    /// `start_oauth_login` directo) es necesario cuando se llama desde `new`,
+    /// que corre antes de que exista el event loop que drena `action_rx`.
+    fn begin_auth(&mut self) {
         match secrets::load_credentials() {
             Ok(creds) if !creds.is_empty() => {
-                app.status = format!("Verificando {} credencial(es)…", creds.len());
-                app.popup = Some(Popup::Token(TokenEntry {
-                    verifying: true,
-                    ..TokenEntry::default()
-                }));
-                app.pending_verifications = creds.len();
+                self.status = format!("Verificando {} credencial(es)…", creds.len());
+                self.welcome.verifying = true;
+                self.welcome.verifying_stored = true;
+                self.pending_verifications = creds.len();
                 for c in creds {
-                    app.spawn_verify(c.credential, c.from_env);
+                    self.spawn_verify(c.credential, c.from_env);
                 }
             }
             Ok(_) => {
-                app.status = "Inicia sesión con Cloudflare".into();
-                app.popup = Some(Popup::Token(TokenEntry::default()));
+                self.status = "Inicia sesión con Cloudflare".into();
+                let _ = self.action_tx.send(Action::StartOAuthLogin);
             }
             Err(e) => {
-                app.status = "Error leyendo el keyring".into();
-                app.popup = Some(Popup::Token(TokenEntry {
-                    error: Some(e.to_string()),
-                    ..TokenEntry::default()
-                }));
+                self.status = "Error leyendo el keyring".into();
+                self.welcome.error = Some(e.to_string());
             }
         }
+    }
 
-        Ok(app)
+    /// Aplica un tema por índice y lo persiste en la config. Un error de
+    /// guardado se refleja en la barra de estado, nunca aborta.
+    fn apply_and_save_theme(&mut self, idx: usize) {
+        theme::set(idx);
+        self.config.theme = Some(theme::current().name.to_string());
+        if let Err(e) = self.config.save() {
+            self.status = format!("No se pudo guardar el tema: {e}");
+            tracing::warn!("guardando tema: {e}");
+        }
     }
 
     // --- Sesiones ---
@@ -363,6 +406,25 @@ impl App {
             return;
         }
 
+        // Pantalla de bienvenida (login + tema del primer arranque): su
+        // propio teclado, antes de cualquier otro routing.
+        if self.screen == Screen::Auth {
+            if let Some(action) = self.welcome_key(key) {
+                self.dispatch(action);
+            }
+            return;
+        }
+
+        // Pantalla de config: su propio teclado, tras el popup y antes de los
+        // focos de texto (inmune a un `self.focus` residual de la pantalla
+        // principal).
+        if self.screen == Screen::Config {
+            if let Some(action) = self.config_key(key) {
+                self.dispatch(action);
+            }
+            return;
+        }
+
         // Las barras de filtro (R2 objetos / logs Workers) capturan todo el
         // texto (incluidas q/?/A). Tab/Shift-Tab siguen el ciclo de paneles;
         // el filtro se mantiene aplicado al salir.
@@ -397,6 +459,7 @@ impl App {
             KeyCode::Tab => self.dispatch(Action::CycleFocus { back: false }),
             KeyCode::BackTab => self.dispatch(Action::CycleFocus { back: true }),
             KeyCode::Char('A') => self.dispatch(Action::OpenAccountPicker),
+            KeyCode::Char(',') => self.open_config_screen(),
             _ => self.route_focus_key(key),
         }
     }
@@ -404,14 +467,36 @@ impl App {
     // --- Mouse ---
 
     fn on_mouse(&mut self, m: MouseEvent) {
-        // Solo en la pantalla principal y sin popup abierto.
-        if self.screen != Screen::Main || self.popup.is_some() {
+        if self.popup.is_some() {
             return;
         }
         let pos = Position {
             x: m.column,
             y: m.row,
         };
+        if self.screen == Screen::Auth {
+            if m.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(action) = self.welcome_click(pos)
+            {
+                self.dispatch(action);
+            }
+            return;
+        }
+        // Config: solo click en la lista de secciones (patrón del sidebar).
+        if self.screen == Screen::Config {
+            if m.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(r) = self.rect_config_sections
+                && r.contains(pos)
+            {
+                self.config_view.focus = ConfigFocus::Sections;
+                let rel = pos.y.saturating_sub(r.y + 1) as usize;
+                self.config_view.section_at(rel);
+            }
+            return;
+        }
+        if self.screen != Screen::Main {
+            return;
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => self.click_at(pos),
             MouseEventKind::ScrollDown => self.scroll_at(pos, 1),
@@ -1011,10 +1096,7 @@ impl App {
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     // Última fila con página pendiente → carga más (sin envolver).
-                    if self.r2.at_last_visible()
-                        && self.r2.has_more()
-                        && !self.r2.loading_objects
-                    {
+                    if self.r2.at_last_visible() && self.r2.has_more() && !self.r2.loading_objects {
                         self.load_more_objects();
                     } else {
                         self.r2.select_entry(1);
@@ -1170,7 +1252,10 @@ impl App {
                         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             Some(Action::OpenTokenPage)
                         }
-                        KeyCode::Esc if self.screen == Screen::Main => {
+                        // Este popup ya solo se abre para añadir un token
+                        // adicional (selector de cuenta / config); la
+                        // pantalla de bienvenida tiene su propio Esc.
+                        KeyCode::Esc => {
                             self.popup = None;
                             None
                         }
@@ -1223,13 +1308,7 @@ impl App {
                         None
                     }
                     KeyCode::Esc => {
-                        if self.screen == Screen::Main {
-                            self.popup = None;
-                        } else {
-                            // Volver a la pantalla de login OAuth (default).
-                            entry.manual = false;
-                            entry.error = None;
-                        }
+                        self.popup = None;
                         None
                     }
                     _ => None,
@@ -1280,34 +1359,8 @@ impl App {
                     }
                     // Eliminar el token de la fila seleccionada (con confirmación).
                     KeyCode::Char('d' | 'x') => {
-                        let row = p.selected_row()?;
-                        let session = row.session;
-                        let suffix = self
-                            .sessions
-                            .get(session)
-                            .map(Session::label_suffix)
-                            .unwrap_or_default();
-                        let n = self
-                            .sessions
-                            .get(session)
-                            .map(|s| s.accounts.len())
-                            .unwrap_or(0);
-                        let is_oauth = self
-                            .sessions
-                            .get(session)
-                            .is_some_and(|s| s.credential().is_oauth());
-                        let nota = if is_oauth {
-                            "(Se revocará la sesión OAuth en Cloudflare.)"
-                        } else {
-                            "(No borra nada en Cloudflare.)"
-                        };
-                        self.popup = Some(Popup::Confirm(Confirm {
-                            title: "Eliminar sesión".into(),
-                            body: format!(
-                                "¿Eliminar la credencial {suffix} y sus {n} cuenta(s) de lazycf?\n{nota}"
-                            ),
-                            on_yes: Action::DeleteToken(session),
-                        }));
+                        let session = p.selected_row()?.session;
+                        self.confirm_delete_token(session);
                         None
                     }
                     KeyCode::Esc => {
@@ -1683,7 +1736,8 @@ impl App {
                     return None;
                 }
                 let save = key.code == KeyCode::F(5)
-                    || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL));
+                    || (key.code == KeyCode::Enter
+                        && key.modifiers.contains(KeyModifiers::CONTROL));
                 if save {
                     let (bucket, text) = match self.popup.as_ref() {
                         Some(Popup::CorsEdit(c)) => (c.bucket.clone(), c.json.value().to_string()),
@@ -1891,7 +1945,8 @@ impl App {
                     return None;
                 }
                 let send = key.code == KeyCode::F(5)
-                    || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL));
+                    || (key.code == KeyCode::Enter
+                        && key.modifiers.contains(KeyModifiers::CONTROL));
                 if send {
                     let (queue_id, body, content_type, delay_text) = match self.popup.as_ref() {
                         Some(Popup::SendMessage(f)) => (
@@ -1908,7 +1963,9 @@ impl App {
                         }
                         return None;
                     }
-                    if content_type == "json" && serde_json::from_str::<serde_json::Value>(&body).is_err() {
+                    if content_type == "json"
+                        && serde_json::from_str::<serde_json::Value>(&body).is_err()
+                    {
                         if let Some(Popup::SendMessage(f)) = self.popup.as_mut() {
                             f.error = Some("JSON inválido".into());
                         }
@@ -1948,23 +2005,21 @@ impl App {
                         KeyCode::Right if f.current() == SendField::ContentType => {
                             f.cycle_content_type(1)
                         }
-                        code if f.current() == SendField::Body => {
-                            match code {
-                                KeyCode::Enter => f.body.insert('\n'),
-                                KeyCode::Backspace => f.body.backspace(),
-                                KeyCode::Delete => f.body.delete(),
-                                KeyCode::Left => f.body.left(),
-                                KeyCode::Right => f.body.right(),
-                                KeyCode::Up => f.body.up(),
-                                KeyCode::Down => f.body.down(),
-                                KeyCode::Home => f.body.home(),
-                                KeyCode::End => f.body.end(),
-                                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                    f.body.insert(ch)
-                                }
-                                _ => {}
+                        code if f.current() == SendField::Body => match code {
+                            KeyCode::Enter => f.body.insert('\n'),
+                            KeyCode::Backspace => f.body.backspace(),
+                            KeyCode::Delete => f.body.delete(),
+                            KeyCode::Left => f.body.left(),
+                            KeyCode::Right => f.body.right(),
+                            KeyCode::Up => f.body.up(),
+                            KeyCode::Down => f.body.down(),
+                            KeyCode::Home => f.body.home(),
+                            KeyCode::End => f.body.end(),
+                            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                f.body.insert(ch)
                             }
-                        }
+                            _ => {}
+                        },
                         code if f.current() == SendField::Delay => {
                             edit_input(&mut f.delay, code);
                         }
@@ -2095,7 +2150,10 @@ impl App {
                         PromptKind::NewFolder => {
                             if value.contains('/') {
                                 Err("El nombre no puede contener '/'".into())
-                            } else if self.r2.folder_exists(&format!("{}{value}/", self.r2.prefix)) {
+                            } else if self
+                                .r2
+                                .folder_exists(&format!("{}{value}/", self.r2.prefix))
+                            {
                                 Err("Ya existe esa carpeta".into())
                             } else {
                                 Ok(Action::CreateFolder { name: value })
@@ -2155,18 +2213,14 @@ impl App {
                 };
                 if duplicated {
                     self.status = "Ese token ya está añadido".into();
-                    if self.screen == Screen::Main
-                        && matches!(self.popup, Some(Popup::Token(_)))
-                    {
+                    if matches!(self.popup, Some(Popup::Token(_))) {
                         self.popup = None;
                     }
                 } else if let Ok((source, client)) = {
                     // La sesión y su client comparten el MISMO source; el
                     // client notifica cada refresh para persistir.
-                    let source = crate::api::CredentialSource::new(
-                        credential,
-                        Some(self.action_tx.clone()),
-                    );
+                    let source =
+                        crate::api::CredentialSource::new(credential, Some(self.action_tx.clone()));
                     CfClient::from_source(source.clone()).map(|c| (source, c))
                 } {
                     let n = accounts.len();
@@ -2177,8 +2231,11 @@ impl App {
                         from_env,
                     });
                     self.persist_credentials();
-                    if self.screen == Screen::Auth {
-                        // Primera sesión válida → entrar a la app.
+                    if self.screen == Screen::Auth && self.welcome.step == WelcomeStep::Auth {
+                        // Primera sesión válida → activarla. Cancela un OAuth
+                        // paralelo (p. ej. si ganó un token manual o una
+                        // segunda credencial guardada).
+                        self.cancel_oauth_login();
                         let si = self.sessions.len() - 1;
                         self.active_session = si;
                         self.active_account = self
@@ -2189,14 +2246,31 @@ impl App {
                                 self.sessions[si].accounts.iter().position(|a| &a.id == id)
                             })
                             .unwrap_or(0);
-                        self.screen = Screen::Main;
-                        self.popup = None;
-                        self.status = "Autenticado".into();
-                        self.load_zones();
-                    } else {
-                        // Token añadido desde el selector: reabrirlo actualizado.
+                        self.load_zones(); // precarga mientras se elige tema
+                        if self.first_run {
+                            self.welcome.enter_theme_step();
+                            self.status = "Autenticado · elige un tema".into();
+                        } else {
+                            self.screen = Screen::Main;
+                            self.status = "Autenticado".into();
+                        }
+                    } else if self.screen == Screen::Auth {
+                        // Paso Theme ya alcanzado: una segunda credencial
+                        // guardada (p. ej. env + keyring) verificó mientras el
+                        // usuario elige tema. No reactivar sesión (evitaría
+                        // clobber de `active_session`), solo contarla.
                         self.status = format!("Token añadido ({n} cuenta(s))");
-                        self.open_account_picker();
+                    } else {
+                        // Token añadido (desde el selector o desde la config).
+                        self.status = format!("Token añadido ({n} cuenta(s))");
+                        if self.screen == Screen::Config {
+                            // Cerrar el popup del token y refrescar in situ.
+                            self.popup = None;
+                            let rows = self.account_rows();
+                            self.config_view.set_accounts(rows);
+                        } else {
+                            self.open_account_picker();
+                        }
                     }
                 }
             }
@@ -2206,22 +2280,21 @@ impl App {
                 if self.sessions.is_empty() && self.pending_verifications == 0 {
                     self.screen = Screen::Auth;
                     self.status = "Fallo de autenticación".into();
-                    match self.popup.as_mut() {
-                        Some(Popup::Token(entry)) => {
-                            entry.verifying = false;
-                            entry.error = Some(msg);
-                        }
-                        _ => {
-                            self.popup = Some(Popup::Token(TokenEntry {
-                                error: Some(msg),
-                                ..TokenEntry::default()
-                            }));
-                        }
+                    // Solo credenciales guardadas: relanzar OAuth ahora que la
+                    // pantalla se vuelve interactiva (un token manual malo no
+                    // debe reabrir el navegador).
+                    let retry_oauth = self.welcome.verifying_stored && self.oauth_task.is_none();
+                    self.welcome.step = WelcomeStep::Auth;
+                    self.welcome.verifying = false;
+                    self.welcome.verifying_stored = false;
+                    self.welcome.error = Some(msg);
+                    if retry_oauth {
+                        let _ = self.action_tx.send(Action::StartOAuthLogin);
                     }
-                } else if self.screen == Screen::Main
+                } else if self.screen != Screen::Auth
                     && let Some(Popup::Token(entry)) = self.popup.as_mut()
                 {
-                    // Fallo al añadir un token desde el selector.
+                    // Fallo al añadir un token (desde el selector o la config).
                     entry.verifying = false;
                     entry.error = Some(msg);
                 } else {
@@ -2240,14 +2313,21 @@ impl App {
             Action::StartOAuthLogin => self.start_oauth_login(),
             Action::CancelOAuthLogin => self.cancel_oauth_login(),
             Action::OAuthUrl(url) => {
-                if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+                if self.screen == Screen::Auth {
+                    self.welcome.oauth_url = Some(url);
+                    self.welcome.copied = false;
+                } else if let Some(Popup::Token(entry)) = self.popup.as_mut() {
                     entry.oauth_url = Some(url);
                 }
             }
             Action::OAuthCompleted(tokens) => {
                 self.oauth_task = None;
                 self.status = "Autorización recibida · verificando…".into();
-                if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+                if self.screen == Screen::Auth {
+                    self.welcome.oauth_in_progress = false;
+                    self.welcome.oauth_url = None;
+                    self.welcome.verifying = true;
+                } else if let Some(Popup::Token(entry)) = self.popup.as_mut() {
                     entry.oauth_in_progress = false;
                     entry.oauth_url = None;
                     entry.verifying = true;
@@ -2258,7 +2338,12 @@ impl App {
             Action::OAuthFailed(msg) => {
                 self.oauth_task = None;
                 self.status = "Fallo en el login OAuth".into();
-                if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+                if self.screen == Screen::Auth {
+                    self.welcome.oauth_in_progress = false;
+                    self.welcome.oauth_url = None;
+                    self.welcome.verifying = false;
+                    self.welcome.error = Some(msg);
+                } else if let Some(Popup::Token(entry)) = self.popup.as_mut() {
                     entry.oauth_in_progress = false;
                     entry.oauth_url = None;
                     entry.error = Some(msg);
@@ -2275,6 +2360,10 @@ impl App {
             Action::OpenAccountPicker => self.open_account_picker(),
             Action::SwitchTo { session, account } => {
                 self.popup = None;
+                // Cambiar de cuenta desde la config sale a la pantalla principal.
+                if self.screen == Screen::Config {
+                    self.close_config_screen();
+                }
                 let valid = self
                     .sessions
                     .get(session)
@@ -2288,10 +2377,7 @@ impl App {
                 let session_changed = session != self.active_session;
                 self.active_session = session;
                 self.active_account = account;
-                self.status = format!(
-                    "Cuenta: {}",
-                    self.sessions[session].accounts[account].name
-                );
+                self.status = format!("Cuenta: {}", self.sessions[session].accounts[account].name);
                 // Recursos account-scoped: resetear y recargar si procede.
                 self.stop_tail();
                 self.tunnels.reset();
@@ -2323,9 +2409,7 @@ impl App {
                 }
                 // Sesión OAuth: revocar el refresh_token (best-effort; si
                 // falla, la sesión se elimina localmente igual).
-                if let secrets::Credential::OAuth { tokens } =
-                    self.sessions[session].credential()
-                {
+                if let secrets::Credential::OAuth { tokens } = self.sessions[session].credential() {
                     tokio::spawn(async move {
                         if let Err(e) =
                             crate::oauth::revoke(&crate::oauth::client_id(), &tokens.refresh_token)
@@ -2338,7 +2422,12 @@ impl App {
                 self.sessions.remove(session);
                 self.persist_credentials();
                 if self.sessions.is_empty() {
-                    // Sin tokens: volver a la pantalla de autenticación.
+                    // Sin tokens: volver a la pantalla de autenticación. Si el
+                    // borrado fue desde la config, cerrarla antes (revierte un
+                    // preview de tema sin confirmar).
+                    if self.screen == Screen::Config {
+                        self.close_config_screen();
+                    }
                     self.active_session = 0;
                     self.active_account = 0;
                     self.stop_tail();
@@ -2352,7 +2441,8 @@ impl App {
                     self.r2.reset();
                     self.screen = Screen::Auth;
                     self.status = "Sin sesiones · inicia sesión de nuevo".into();
-                    self.popup = Some(Popup::Token(TokenEntry::default()));
+                    self.welcome.reset_auth();
+                    let _ = self.action_tx.send(Action::StartOAuthLogin);
                     return;
                 }
                 let active_removed = self.active_session == session;
@@ -2382,7 +2472,14 @@ impl App {
                     }
                 }
                 self.status = "Token eliminado".into();
-                self.open_account_picker();
+                // Desde la config: refrescar las cuentas in situ; si no, reabrir
+                // el selector.
+                if self.screen == Screen::Config {
+                    let rows = self.account_rows();
+                    self.config_view.set_accounts(rows);
+                } else {
+                    self.open_account_picker();
+                }
             }
 
             Action::ZonesLoaded(zones) => {
@@ -2684,7 +2781,10 @@ impl App {
                     self.status = format!("Error: {e}");
                 }
             }
-            Action::ConsumersLoaded { queue_id, consumers } => {
+            Action::ConsumersLoaded {
+                queue_id,
+                consumers,
+            } => {
                 if self.queues.selected_id().as_deref() == Some(queue_id.as_str()) {
                     self.queues.set_consumers(consumers);
                 }
@@ -2936,17 +3036,15 @@ impl App {
                 }
             }
             Action::GeneratePresign { key, expires } => self.generate_presign(key, expires),
-            Action::ImageDecoded { key, result } => {
-                match result {
-                    Ok((w, h, rgb)) => {
-                        let lines = crate::components::r2::image_lines(w, h, &rgb);
-                        let title = key.rsplit('/').next().unwrap_or(&key).to_string();
-                        self.popup = Some(Popup::ImageView(ImageView { title, lines }));
-                        self.status.clear();
-                    }
-                    Err(e) => self.status = format!("Preview: {e}"),
+            Action::ImageDecoded { key, result } => match result {
+                Ok((w, h, rgb)) => {
+                    let lines = crate::components::r2::image_lines(w, h, &rgb);
+                    let title = key.rsplit('/').next().unwrap_or(&key).to_string();
+                    self.popup = Some(Popup::ImageView(ImageView { title, lines }));
+                    self.status.clear();
                 }
-            }
+                Err(e) => self.status = format!("Preview: {e}"),
+            },
             Action::SaveCors { bucket, rules } => self.spawn_save_cors(bucket, rules),
             Action::CorsMutated(msg) => {
                 self.status = msg;
@@ -3019,8 +3117,10 @@ impl App {
             .unwrap_or("")
     }
 
-    /// Abre el selector con todas las cuentas de todos los tokens.
-    fn open_account_picker(&mut self) {
+    /// Todas las cuentas de todos los tokens como filas del selector.
+    /// Compartido por el popup `AccountPicker` y la sección Cuentas de la
+    /// pantalla de configuración.
+    fn account_rows(&self) -> Vec<AccountRow> {
         let mut rows = Vec::new();
         for (si, s) in self.sessions.iter().enumerate() {
             let suffix = s.label_suffix();
@@ -3042,7 +3142,366 @@ impl App {
                 });
             }
         }
+        rows
+    }
+
+    /// Abre el selector con todas las cuentas de todos los tokens.
+    fn open_account_picker(&mut self) {
+        let rows = self.account_rows();
         self.popup = Some(Popup::AccountPicker(AccountPicker::new(rows)));
+    }
+
+    /// Pide confirmación para eliminar el token (sesión) indicado. Compartido
+    /// por el popup de cuentas y la sección Cuentas de la config.
+    fn confirm_delete_token(&mut self, session: usize) {
+        let suffix = self
+            .sessions
+            .get(session)
+            .map(Session::label_suffix)
+            .unwrap_or_default();
+        let n = self
+            .sessions
+            .get(session)
+            .map(|s| s.accounts.len())
+            .unwrap_or(0);
+        let is_oauth = self
+            .sessions
+            .get(session)
+            .is_some_and(|s| s.credential().is_oauth());
+        let nota = if is_oauth {
+            "(Se revocará la sesión OAuth en Cloudflare.)"
+        } else {
+            "(No borra nada en Cloudflare.)"
+        };
+        self.popup = Some(Popup::Confirm(Confirm {
+            title: "Eliminar sesión".into(),
+            body: format!(
+                "¿Eliminar la credencial {suffix} y sus {n} cuenta(s) de lazycf?\n{nota}"
+            ),
+            on_yes: Action::DeleteToken(session),
+        }));
+    }
+
+    // --- Pantalla de bienvenida (auth + tema del primer arranque) ---
+
+    /// Teclado de la pantalla de bienvenida: despacha según el paso activo.
+    fn welcome_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match self.welcome.step {
+            WelcomeStep::Auth => self.welcome_auth_key(key),
+            WelcomeStep::Theme => self.welcome_theme_key(key),
+        }
+    }
+
+    /// Paso Auth: Tab/↑↓ mueve el foco (Url → Token → Continue → Back), Enter
+    /// actúa según el foco, Esc siempre cancela+reinicia OAuth.
+    fn welcome_auth_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if self.welcome.verifying {
+            return None; // Ctrl-C (salir) ya se intercepta antes de on_key.
+        }
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => {
+                self.welcome.cycle_focus(false);
+                None
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.welcome.cycle_focus(true);
+                None
+            }
+            KeyCode::Esc => self.restart_oauth_from_welcome(),
+            KeyCode::Enter => match self.welcome.focus {
+                WelcomeFocus::Url => {
+                    if let Some(url) = self.welcome.oauth_url.clone() {
+                        crate::tui::osc52_copy(&url);
+                        self.welcome.copied = true;
+                        self.status = "URL copiada al portapapeles".into();
+                    }
+                    None
+                }
+                WelcomeFocus::Back => self.restart_oauth_from_welcome(),
+                WelcomeFocus::Token | WelcomeFocus::Continue => {
+                    if self.welcome.token_input.value().trim().is_empty() {
+                        self.welcome.error = Some("El token está vacío".into());
+                        None
+                    } else {
+                        self.welcome.error = None;
+                        self.welcome.verifying = true;
+                        Some(Action::SubmitToken(self.welcome.token_input.take()))
+                    }
+                }
+            },
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::OpenTokenPage)
+            }
+            KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+                if self.welcome.focus == WelcomeFocus::Token =>
+            {
+                edit_input(&mut self.welcome.token_input, key.code);
+                None
+            }
+            KeyCode::Char(c) => {
+                // Escribir en cualquier foco cae siempre al campo de token
+                // (pegar/teclear no debe perderse por tener otro elemento
+                // enfocado). Consecuencia: `q` no sale de esta pantalla.
+                self.welcome.focus = WelcomeFocus::Token;
+                self.welcome.token_input.insert(c);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Cancela un OAuth en vuelo (si lo hay), limpia el formulario y relanza
+    /// el login (nueva URL, nuevo intento). Usado por Back y Esc.
+    fn restart_oauth_from_welcome(&mut self) -> Option<Action> {
+        self.cancel_oauth_login();
+        self.welcome.reset_auth();
+        Some(Action::StartOAuthLogin)
+    }
+
+    /// Paso Theme: ↑↓ previsualiza en vivo, Tab cambia al botón, Enter/Esc
+    /// confirman y guardan (Esc no bloquea, igual que el picker que sustituye).
+    fn welcome_theme_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = self.welcome.move_theme(-1);
+                theme::set(i);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let i = self.welcome.move_theme(1);
+                theme::set(i);
+                None
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.welcome.theme_on_continue = !self.welcome.theme_on_continue;
+                None
+            }
+            KeyCode::Enter | KeyCode::Esc => {
+                let sel = self.welcome.theme_selected();
+                self.apply_and_save_theme(sel);
+                self.finish_onboarding();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Click izquierdo en la bienvenida: hit-test contra los rects cacheados
+    /// por `WelcomeView::draw` en el último frame.
+    fn welcome_click(&mut self, pos: Position) -> Option<Action> {
+        match self.welcome.step {
+            WelcomeStep::Auth => {
+                let synth_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                if self.welcome.rect_url.is_some_and(|r| r.contains(pos)) {
+                    self.welcome.focus = WelcomeFocus::Url;
+                    return self.welcome_auth_key(synth_enter);
+                }
+                if self.welcome.rect_token.is_some_and(|r| r.contains(pos)) {
+                    self.welcome.focus = WelcomeFocus::Token;
+                    return None;
+                }
+                if self.welcome.rect_continue.is_some_and(|r| r.contains(pos)) {
+                    self.welcome.focus = WelcomeFocus::Continue;
+                    return self.welcome_auth_key(synth_enter);
+                }
+                if self.welcome.rect_back.is_some_and(|r| r.contains(pos)) {
+                    self.welcome.focus = WelcomeFocus::Back;
+                    return self.welcome_auth_key(synth_enter);
+                }
+                None
+            }
+            WelcomeStep::Theme => {
+                if let Some(r) = self.welcome.rect_themes
+                    && r.contains(pos)
+                {
+                    self.welcome.theme_on_continue = false;
+                    let rel = pos.y.saturating_sub(r.y + 1) as usize;
+                    if widgets::row_at(&mut self.welcome.theme_state, theme::all().len(), rel) {
+                        theme::set(self.welcome.theme_selected());
+                    }
+                    return None;
+                }
+                if self.welcome.rect_continue.is_some_and(|r| r.contains(pos)) {
+                    self.welcome.theme_on_continue = true;
+                    return self.welcome_theme_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+                None
+            }
+        }
+    }
+
+    /// Tema confirmado en el primer arranque: entra a la app.
+    fn finish_onboarding(&mut self) {
+        self.screen = Screen::Main;
+        self.status = "Autenticado".into();
+    }
+
+    // --- Pantalla de configuración ---
+
+    /// Entra en la pantalla de config. No toca `self.focus`: al cerrar se
+    /// restaura solo (la pantalla principal se redibuja con el foco previo).
+    fn open_config_screen(&mut self) {
+        let rows = self.account_rows();
+        self.config_view.open(theme::current_index(), rows);
+        self.screen = Screen::Config;
+    }
+
+    /// Sale de la config a la pantalla principal. Si había un preview de tema
+    /// sin confirmar (Enter), lo revierte al tema guardado. Única invariante
+    /// del preview.
+    fn close_config_screen(&mut self) {
+        if theme::current_index() != self.config_view.saved_theme {
+            theme::set(self.config_view.saved_theme);
+        }
+        self.screen = Screen::Main;
+    }
+
+    /// Teclado de la pantalla de config. Devuelve una `Action` para lo que debe
+    /// pasar por el dispatch (cambiar cuenta, salir); el resto lo resuelve aquí.
+    fn config_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Char('q') => return Some(Action::Quit),
+            KeyCode::Esc | KeyCode::Char(',') => {
+                self.close_config_screen();
+                return None;
+            }
+            KeyCode::Char('?') => {
+                self.popup = Some(Popup::Help(self.build_config_help()));
+                return None;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.config_view.toggle_focus();
+                return None;
+            }
+            _ => {}
+        }
+        match self.config_view.focus {
+            ConfigFocus::Sections => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.config_view.move_section(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.config_view.move_section(1),
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    self.config_view.focus = ConfigFocus::Content;
+                }
+                _ => {}
+            },
+            ConfigFocus::Content => {
+                // ←/h vuelve siempre al sidebar de secciones.
+                if matches!(key.code, KeyCode::Left | KeyCode::Char('h')) {
+                    self.config_view.focus = ConfigFocus::Sections;
+                    return None;
+                }
+                match self.config_view.section {
+                    ConfigSection::Theme => match key.code {
+                        // Preview vivo: aplica sin guardar hasta Enter.
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            let i = self.config_view.move_theme(-1);
+                            theme::set(i);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let i = self.config_view.move_theme(1);
+                            theme::set(i);
+                        }
+                        KeyCode::Enter => {
+                            let sel = self.config_view.theme_selected();
+                            self.apply_and_save_theme(sel);
+                            self.config_view.saved_theme = sel;
+                        }
+                        _ => {}
+                    },
+                    ConfigSection::Accounts => match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => self.config_view.move_account(-1),
+                        KeyCode::Down | KeyCode::Char('j') => self.config_view.move_account(1),
+                        KeyCode::Enter => {
+                            // Fila "(sin cuentas)" (usize::MAX) no es activable.
+                            if let Some((session, account)) = self
+                                .config_view
+                                .selected_account()
+                                .filter(|r| r.account != usize::MAX)
+                                .map(|r| (r.session, r.account))
+                            {
+                                return Some(Action::SwitchTo { session, account });
+                            }
+                        }
+                        KeyCode::Char('a') => {
+                            self.popup = Some(Popup::Token(TokenEntry::default()));
+                        }
+                        KeyCode::Char('d' | 'x') => {
+                            if let Some(session) =
+                                self.config_view.selected_account().map(|r| r.session)
+                            {
+                                self.confirm_delete_token(session);
+                            }
+                        }
+                        _ => {}
+                    },
+                    ConfigSection::Language => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Hint de la barra inferior según (foco, sección) en la config.
+    fn config_status_hint(&self) -> String {
+        match self.config_view.focus {
+            ConfigFocus::Sections => {
+                "↑↓ sección · Enter/→ entrar · Tab · , cerrar · ? ayuda".into()
+            }
+            ConfigFocus::Content => match self.config_view.section {
+                ConfigSection::Theme => {
+                    "↑↓ previsualizar · Enter aplicar · ←/h volver · , cerrar".into()
+                }
+                ConfigSection::Accounts => {
+                    "↑↓ cuenta · Enter cambiar · a añadir · d borrar · ←/h volver".into()
+                }
+                ConfigSection::Language => "←/h volver · , cerrar · ? ayuda".into(),
+            },
+        }
+    }
+
+    /// Ayuda propia de la pantalla de config.
+    fn build_config_help(&self) -> Help {
+        Help {
+            sections: vec![
+                HelpSection::new(
+                    "Global",
+                    vec![
+                        ("Tab", "cambiar de columna"),
+                        (", / Esc", "cerrar configuración"),
+                        ("?", "esta ayuda"),
+                        ("q / Ctrl-C", "salir"),
+                    ],
+                ),
+                HelpSection::new(
+                    "Secciones",
+                    vec![
+                        ("↑ ↓ / k j", "navegar secciones"),
+                        ("Enter / → / l", "entrar en la sección"),
+                        ("← / h", "volver a las secciones"),
+                    ],
+                ),
+                HelpSection::new(
+                    "Tema",
+                    vec![
+                        ("↑ ↓", "previsualizar en vivo"),
+                        ("Enter", "aplicar y guardar"),
+                    ],
+                ),
+                HelpSection::new(
+                    "Cuentas",
+                    vec![
+                        ("Enter", "cambiar de cuenta (sale a la app)"),
+                        ("a", "añadir token"),
+                        ("d / x", "borrar token (con confirmación)"),
+                    ],
+                ),
+            ],
+        }
     }
 
     /// Filtra `all_zones` por la cuenta activa y carga los registros de la primera.
@@ -3106,7 +3565,12 @@ impl App {
             return; // ya hay un flujo en vuelo
         }
         self.status = "Abriendo el navegador… esperando autorización".into();
-        if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+        if self.screen == Screen::Auth {
+            self.welcome.error = None;
+            self.welcome.oauth_in_progress = true;
+            self.welcome.oauth_url = None;
+            self.welcome.copied = false;
+        } else if let Some(Popup::Token(entry)) = self.popup.as_mut() {
             entry.error = None;
             entry.oauth_in_progress = true;
             entry.oauth_url = None;
@@ -3133,7 +3597,10 @@ impl App {
             task.abort();
             self.status = "Login OAuth cancelado".into();
         }
-        if let Some(Popup::Token(entry)) = self.popup.as_mut() {
+        if self.screen == Screen::Auth {
+            self.welcome.oauth_in_progress = false;
+            self.welcome.oauth_url = None;
+        } else if let Some(Popup::Token(entry)) = self.popup.as_mut() {
             entry.oauth_in_progress = false;
             entry.oauth_url = None;
         }
@@ -3153,12 +3620,9 @@ impl App {
 
     fn panes(&self) -> &'static [Focus] {
         static DNS_PANES: &[Focus] = &[Focus::Modules, Focus::Zones, Focus::Records];
-        static TUNNEL_PANES: &[Focus] =
-            &[Focus::Modules, Focus::Tunnels, Focus::TunnelRoutes];
-        static WORKER_PANES: &[Focus] =
-            &[Focus::Modules, Focus::Workers, Focus::WorkersDetail];
-        static QUEUE_PANES: &[Focus] =
-            &[Focus::Modules, Focus::Queues, Focus::QueuesDetail];
+        static TUNNEL_PANES: &[Focus] = &[Focus::Modules, Focus::Tunnels, Focus::TunnelRoutes];
+        static WORKER_PANES: &[Focus] = &[Focus::Modules, Focus::Workers, Focus::WorkersDetail];
+        static QUEUE_PANES: &[Focus] = &[Focus::Modules, Focus::Queues, Focus::QueuesDetail];
         static D1_PANES: &[Focus] = &[
             Focus::Modules,
             Focus::D1Dbs,
@@ -3204,14 +3668,13 @@ impl App {
             global.push(("Tab / ⇧Tab", "cambiar de panel"));
         }
         global.push(("A", "cambiar de cuenta"));
+        global.push((",", "configuración"));
         global.push(("?", "esta ayuda"));
         global.push(("q / Ctrl-C", "salir"));
 
         let mut sections = vec![HelpSection::new("Global", global)];
         sections.push(match self.focus {
-            Focus::Modules => {
-                HelpSection::new("Módulos", vec![("↑ ↓ / k j", "navegar módulos")])
-            }
+            Focus::Modules => HelpSection::new("Módulos", vec![("↑ ↓ / k j", "navegar módulos")]),
             Focus::Zones => HelpSection::new(
                 "Zonas",
                 vec![
@@ -3308,10 +3771,7 @@ impl App {
             ),
             Focus::D1Dbs => HelpSection::new(
                 "Bases D1",
-                vec![
-                    ("↑ ↓ / k j", "navegar bases"),
-                    ("r", "recargar bases"),
-                ],
+                vec![("↑ ↓ / k j", "navegar bases"), ("r", "recargar bases")],
             ),
             Focus::D1Tables => HelpSection::new(
                 "Tablas D1",
@@ -3413,8 +3873,35 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let shell = layout::shell(area);
+
+        // Bienvenida (login + tema del primer arranque): pantalla propia, sin
+        // shell ni command bar (sus propios hints van en la última línea).
+        if self.screen == Screen::Auth {
+            self.welcome.draw(frame, area);
+            return;
+        }
+
+        // Pantalla de config: reutiliza el shell (secciones en el sidebar,
+        // contenido en el main) y dibuja el popup encima si lo hay.
+        if self.screen == Screen::Config {
+            self.rect_config_sections = Some(shell.sidebar);
+            let sections_focused = self.config_view.focus == ConfigFocus::Sections;
+            self.config_view
+                .draw_sections(frame, shell.sidebar, sections_focused);
+            self.config_view
+                .draw_content(frame, shell.main, !sections_focused);
+            let (left, right) = self.status_line();
+            self.command_bar
+                .draw(frame, shell.command_bar, &left, &right);
+            if let Some(popup) = &mut self.popup {
+                crate::components::popup::draw(frame, area, popup);
+            }
+            return;
+        }
+
         let main_active = self.screen == Screen::Main;
 
+        self.rect_config_sections = None;
         self.rect_sidebar = shell.sidebar;
         self.rect_zones = None;
         self.rect_records = None;
@@ -3461,8 +3948,7 @@ impl App {
                 self.rect_tunnel_routes = Some(routes_area);
             }
             Module::Workers if main_active => {
-                let (list_area, detail_area) =
-                    crate::components::workers::split(shell.main);
+                let (list_area, detail_area) = crate::components::workers::split(shell.main);
                 self.workers
                     .draw_list(frame, list_area, self.focus == Focus::Workers);
                 let detail_focused =
@@ -3547,7 +4033,8 @@ impl App {
         }
 
         let (left, right) = self.status_line();
-        self.command_bar.draw(frame, shell.command_bar, &left, &right);
+        self.command_bar
+            .draw(frame, shell.command_bar, &left, &right);
 
         if let Some(popup) = &mut self.popup {
             crate::components::popup::draw(frame, area, popup);
@@ -3575,9 +4062,13 @@ impl App {
         };
         let right = if self.popup.is_some() {
             String::new()
+        } else if self.screen == Screen::Config {
+            self.config_status_hint()
         } else {
             match self.focus {
-                Focus::Modules => "↑↓ módulo · Tab → · A cuenta · ? ayuda · q salir".into(),
+                Focus::Modules => {
+                    "↑↓ módulo · Tab → · A cuenta · , config · ? ayuda · q salir".into()
+                }
                 Focus::Zones => "↑↓ zona · Tab → · p purgar · r · A · ? ayuda".into(),
                 Focus::Records => {
                     "↑↓ · Espacio proxy · a nuevo · e editar · d borrar · ? ayuda".into()
@@ -3593,7 +4084,8 @@ impl App {
                 }
                 Focus::WorkersDetail => match self.workers.active_tab {
                     1 => "↑↓ deploy · Enter revertir · 1-5 pestaña · l logs · t · r · ?".into(),
-                    3 => "↑↓ log · Enter detalle · / filtrar · E errores · y copiar · End sigue".into(),
+                    3 => "↑↓ log · Enter detalle · / filtrar · E errores · y copiar · End sigue"
+                        .into(),
                     _ => "↑↓ contenido · 1-5 pestaña · e editar · a secreto · l · t · ?".into(),
                 },
                 Focus::Queues => {

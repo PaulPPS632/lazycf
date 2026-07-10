@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::components::input::TextInput;
 use crate::model::{D1Database, QueryOutcome};
@@ -18,11 +18,52 @@ use crate::ui::widgets::{dim, dim_line, placeholder, row_at, select_wrap};
 
 /// Keywords SQL ofrecidas por el autocompletado (en MAYÚSCULA).
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN",
-    "EXISTS", "INSERT INTO", "VALUES", "UPDATE", "SET", "DELETE FROM", "CREATE TABLE",
-    "DROP TABLE", "ALTER TABLE", "JOIN", "LEFT JOIN", "INNER JOIN", "CROSS JOIN", "ON", "AS",
-    "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "DISTINCT", "ASC", "DESC", "CASE",
-    "WHEN", "THEN", "ELSE", "END", "UNION", "PRAGMA", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX(",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "LIKE",
+    "BETWEEN",
+    "EXISTS",
+    "INSERT INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE FROM",
+    "CREATE TABLE",
+    "DROP TABLE",
+    "ALTER TABLE",
+    "JOIN",
+    "LEFT JOIN",
+    "INNER JOIN",
+    "CROSS JOIN",
+    "ON",
+    "AS",
+    "GROUP BY",
+    "ORDER BY",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "DISTINCT",
+    "ASC",
+    "DESC",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "UNION",
+    "PRAGMA",
+    "COUNT(",
+    "SUM(",
+    "AVG(",
+    "MIN(",
+    "MAX(",
 ];
 
 /// Tipo de sugerencia (define color y prioridad contextual).
@@ -249,8 +290,8 @@ impl D1View {
     /// tabla base) + keywords de cláusula. `forced` = Ctrl+Espacio.
     pub fn update_where_suggestions(&mut self, forced: bool) {
         const WHERE_KEYWORDS: &[&str] = &[
-            "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "EXISTS", "CASE",
-            "WHEN", "THEN", "ELSE", "END",
+            "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "EXISTS", "CASE", "WHEN",
+            "THEN", "ELSE", "END",
         ];
         self.sug_where = true;
         let word = self.where_input.word_before_cursor();
@@ -374,10 +415,15 @@ impl D1View {
                 kind: SugKind::Column,
             }));
         }
-        out.extend(self.tables.iter().filter(|t| matches(t)).map(|t| Suggestion {
-            text: t.clone(),
-            kind: SugKind::Table,
-        }));
+        out.extend(
+            self.tables
+                .iter()
+                .filter(|t| matches(t))
+                .map(|t| Suggestion {
+                    text: t.clone(),
+                    kind: SugKind::Table,
+                }),
+        );
         if ctx != Ctx::Tables {
             out.extend(
                 SQL_KEYWORDS
@@ -578,11 +624,11 @@ impl D1View {
 
         // Barra de estado del editor.
         let hint = if self.running {
-            Span::styled("Ejecutando…", Style::default().fg(theme::ACCENT))
+            Span::styled("Ejecutando…", Style::default().fg(theme::accent()))
         } else {
             Span::styled(
                 "F5 / Ctrl+Enter ejecutar · Ctrl+Espacio sugerir",
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             )
         };
         frame.render_widget(Paragraph::new(Line::from(hint)), rows[1]);
@@ -619,13 +665,8 @@ impl D1View {
             // No cabe abajo: encima de la línea del cursor.
             (text_area.y + line as u16).saturating_sub(height)
         };
-        let rect = Rect::new(
-            x,
-            y,
-            width.min(screen.width),
-            height.min(screen.height),
-        )
-        .intersection(screen);
+        let rect = Rect::new(x, y, width.min(screen.width), height.min(screen.height))
+            .intersection(screen);
         if rect.is_empty() {
             return;
         }
@@ -636,9 +677,9 @@ impl D1View {
             .enumerate()
             .map(|(i, s)| {
                 let color = match s.kind {
-                    SugKind::Keyword => theme::ACCENT,
-                    SugKind::Table => theme::OK,
-                    SugKind::Column => theme::FG,
+                    SugKind::Keyword => theme::accent(),
+                    SugKind::Table => theme::ok(),
+                    SugKind::Column => theme::fg(),
                 };
                 let style = if i == self.sug_idx {
                     theme::selection()
@@ -698,7 +739,7 @@ impl D1View {
             D1Panel::Loading => frame.render_widget(dim("Ejecutando…"), inner),
             D1Panel::Error(e) => frame.render_widget(
                 Paragraph::new(format!("✗ {e}"))
-                    .style(Style::default().fg(theme::ERROR))
+                    .style(Style::default().fg(theme::error()))
                     .wrap(Wrap { trim: true }),
                 inner,
             ),
@@ -716,7 +757,7 @@ impl D1View {
                         Paragraph::new(dim_line("(sin filas)")).wrap(Wrap { trim: true }),
                         grid_area,
                     );
-                    let sum = Span::styled(outcome.summary(), Style::default().fg(theme::DIM));
+                    let sum = Span::styled(outcome.summary(), Style::default().fg(theme::dim()));
                     frame.render_widget(Paragraph::new(Line::from(sum)), parts[1]);
                     return;
                 }
@@ -787,7 +828,7 @@ impl D1View {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         summary,
-                        Style::default().fg(theme::DIM),
+                        Style::default().fg(theme::dim()),
                     ))),
                     parts[1],
                 );
@@ -870,17 +911,44 @@ fn tokenize(sql: &str) -> Vec<String> {
 /// Palabras que, si aparecen justo tras una tabla, indican que NO hay alias
 /// (la tabla se usa sola y lo que sigue es la siguiente cláusula).
 const RESERVED_AFTER_TABLE: &[&str] = &[
-    "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "JOIN", "LEFT", "RIGHT", "INNER",
-    "CROSS", "FULL", "OUTER", "ON", "UNION", "SET", "AND", "OR", "VALUES", "RETURNING", "AS",
+    "WHERE",
+    "GROUP",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "CROSS",
+    "FULL",
+    "OUTER",
+    "ON",
+    "UNION",
+    "SET",
+    "AND",
+    "OR",
+    "VALUES",
+    "RETURNING",
+    "AS",
 ];
 
 fn is_word(t: &str) -> bool {
-    t.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+    t.chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Columnas de `table` en `schema`, comparando el nombre case-insensitive.
-fn schema_columns<'a>(schema: &'a HashMap<String, Vec<String>>, table: &str) -> Option<&'a Vec<String>> {
-    schema.iter().find(|(k, _)| k.eq_ignore_ascii_case(table)).map(|(_, v)| v)
+fn schema_columns<'a>(
+    schema: &'a HashMap<String, Vec<String>>,
+    table: &str,
+) -> Option<&'a Vec<String>> {
+    schema
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(table))
+        .map(|(_, v)| v)
 }
 
 /// Índice del `)` que cierra el `(` en `open` (tokens ya balanceados).
@@ -1189,7 +1257,7 @@ fn grid_lines(
     sel_row: usize,
     sel_col: usize,
 ) -> Vec<Line<'static>> {
-    let sep = Style::default().fg(theme::DIM);
+    let sep = Style::default().fg(theme::dim());
     let mut lines: Vec<Line> = Vec::new();
 
     // Cabecera.
@@ -1218,7 +1286,7 @@ fn grid_lines(
             let style = if r == sel_row && ci == sel_col {
                 theme::selection()
             } else {
-                Style::default().fg(theme::FG)
+                Style::default().fg(theme::fg())
             };
             spans.push(Span::styled(format!(" {text} "), style));
         }
@@ -1234,7 +1302,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn schema() -> HashMap<String, Vec<String>> {
-        HashMap::from([("documents".to_string(), vec!["id".to_string(), "name".to_string()])])
+        HashMap::from([(
+            "documents".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+        )])
     }
 
     fn aliases(sql: &str) -> HashMap<String, Vec<String>> {
@@ -1244,13 +1315,19 @@ mod tests {
     #[test]
     fn alias_con_as() {
         let a = aliases("select * from documents as d where d.x = 1");
-        assert_eq!(a.get("d"), Some(&vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(
+            a.get("d"),
+            Some(&vec!["id".to_string(), "name".to_string()])
+        );
     }
 
     #[test]
     fn alias_sin_as() {
         let a = aliases("select * from documents d where d.x = 1");
-        assert_eq!(a.get("d"), Some(&vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(
+            a.get("d"),
+            Some(&vec!["id".to_string(), "name".to_string()])
+        );
     }
 
     #[test]
@@ -1268,13 +1345,19 @@ mod tests {
     #[test]
     fn join_con_alias() {
         let a = aliases("from a inner join documents d on a.id = d.a_id");
-        assert_eq!(a.get("d"), Some(&vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(
+            a.get("d"),
+            Some(&vec!["id".to_string(), "name".to_string()])
+        );
     }
 
     #[test]
     fn subquery_select_star() {
         let a = aliases("select * from (select * from documents) x where x.");
-        assert_eq!(a.get("x"), Some(&vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(
+            a.get("x"),
+            Some(&vec!["id".to_string(), "name".to_string()])
+        );
     }
 
     #[test]
@@ -1286,6 +1369,9 @@ mod tests {
     #[test]
     fn subquery_table_star() {
         let a = aliases("select * from (select d.* from documents d) x");
-        assert_eq!(a.get("x"), Some(&vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(
+            a.get("x"),
+            Some(&vec!["id".to_string(), "name".to_string()])
+        );
     }
 }

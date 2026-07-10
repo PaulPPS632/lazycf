@@ -1,12 +1,10 @@
 //! Vista del módulo DNS: lista de zonas (izq) + tabla de registros (der).
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Cell, List, ListItem, ListState, Row, Table, TableState,
-};
-use ratatui::Frame;
+use ratatui::widgets::{Block, Cell, List, ListItem, ListState, Row, Table, TableState};
 
 use crate::model::{DnsRecord, Zone};
 use crate::ui::theme;
@@ -77,8 +75,11 @@ impl DnsView {
     pub fn set_records(&mut self, records: Vec<DnsRecord>) {
         self.records = records;
         self.loading_records = false;
-        self.record_state
-            .select(if self.records.is_empty() { None } else { Some(0) });
+        self.record_state.select(if self.records.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
     }
 
     pub fn begin_loading_records(&mut self) {
@@ -89,7 +90,9 @@ impl DnsView {
     }
 
     pub fn selected_record(&self) -> Option<&DnsRecord> {
-        self.record_state.selected().and_then(|i| self.records.get(i))
+        self.record_state
+            .selected()
+            .and_then(|i| self.records.get(i))
     }
 
     pub fn select_record(&mut self, delta: i32) {
@@ -184,7 +187,7 @@ fn zone_line(z: &Zone) -> Line<'static> {
     if !z.status.is_empty() && z.status != "active" {
         spans.push(Span::styled(
             format!("  ({})", z.status),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ));
     }
     Line::from(spans)
@@ -193,11 +196,11 @@ fn zone_line(z: &Zone) -> Line<'static> {
 /// Celda de la columna PROXY según proxiabilidad y estado.
 fn proxy_cell(r: &DnsRecord) -> Span<'static> {
     if !r.is_proxiable() {
-        Span::styled("—", Style::default().fg(theme::DIM))
+        Span::styled("—", Style::default().fg(theme::dim()))
     } else if r.proxied == Some(true) {
-        Span::styled("● on", Style::default().fg(theme::ACCENT))
+        Span::styled("● on", Style::default().fg(theme::accent()))
     } else {
-        Span::styled("○ off", Style::default().fg(theme::DIM))
+        Span::styled("○ off", Style::default().fg(theme::dim()))
     }
 }
 

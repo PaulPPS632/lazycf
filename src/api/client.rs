@@ -12,10 +12,10 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use color_eyre::eyre::{bail, eyre, Result};
+use color_eyre::eyre::{Result, bail, eyre};
 use reqwest::{Client, Method, Response, StatusCode};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::action::Action;
@@ -143,7 +143,12 @@ impl CfClient {
     /// Ejecuta la petición con backoff ante 429 y devuelve `(status, body)`.
     /// Con credencial OAuth, un 401 dispara un refresh (single-flight) y un
     /// único reintento; si persiste, se devuelve el 401 tal cual (no loop).
-    async fn raw<B>(&self, method: Method, path: &str, body: Option<&B>) -> Result<(StatusCode, String)>
+    async fn raw<B>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<(StatusCode, String)>
     where
         B: Serialize + ?Sized,
     {
@@ -153,10 +158,7 @@ impl CfClient {
         loop {
             attempt += 1;
             let token = self.bearer().await?;
-            let mut req = self
-                .http
-                .request(method.clone(), &url)
-                .bearer_auth(&token);
+            let mut req = self.http.request(method.clone(), &url).bearer_auth(&token);
             if let Some(b) = body {
                 req = req.json(b);
             }
@@ -183,7 +185,11 @@ impl CfClient {
     }
 
     /// Decodifica el envelope y falla si `success == false`.
-    fn check<T: DeserializeOwned>(path: &str, status: StatusCode, text: &str) -> Result<CfResponse<T>> {
+    fn check<T: DeserializeOwned>(
+        path: &str,
+        status: StatusCode,
+        text: &str,
+    ) -> Result<CfResponse<T>> {
         let parsed: CfResponse<T> = serde_json::from_str(text).map_err(|e| {
             eyre!(
                 "decodificando {path}: {e}; contexto: {}",
@@ -198,7 +204,14 @@ impl CfClient {
                 .filter(|m| !m.is_empty())
                 .collect::<Vec<_>>()
                 .join("; ");
-            bail!("{}", if msg.is_empty() { format!("Error HTTP {status}") } else { msg });
+            bail!(
+                "{}",
+                if msg.is_empty() {
+                    format!("Error HTTP {status}")
+                } else {
+                    msg
+                }
+            );
         }
         Ok(parsed)
     }
@@ -235,8 +248,12 @@ impl CfClient {
     /// `result_info` extendido, p. ej. objetos R2 con `delimited`/`cursor`).
     pub async fn get_value(&self, path: &str) -> Result<serde_json::Value> {
         let (status, text) = self.raw::<()>(Method::GET, path, None).await?;
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| eyre!("decodificando {path}: {e}; cuerpo: {}", truncate(&text, 300)))?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            eyre!(
+                "decodificando {path}: {e}; cuerpo: {}",
+                truncate(&text, 300)
+            )
+        })?;
         if !v["success"].as_bool().unwrap_or(false) {
             let msg = v["errors"]
                 .as_array()
@@ -249,7 +266,14 @@ impl CfClient {
                         .join("; ")
                 })
                 .unwrap_or_default();
-            bail!("{}", if msg.is_empty() { format!("Error HTTP {status}") } else { msg });
+            bail!(
+                "{}",
+                if msg.is_empty() {
+                    format!("Error HTTP {status}")
+                } else {
+                    msg
+                }
+            );
         }
         Ok(v)
     }
@@ -258,7 +282,12 @@ impl CfClient {
     /// En error el cuerpo es el envelope JSON → se extrae el mensaje.
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let url = format!("{BASE}{path}");
-        let resp = self.http.get(&url).bearer_auth(self.bearer().await?).send().await?;
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer().await?)
+            .send()
+            .await?;
         let status = resp.status();
         let bytes = resp.bytes().await?;
         if !status.is_success() {
@@ -329,8 +358,12 @@ impl CfClient {
 
         let body = serde_json::json!({ "query": query, "variables": variables });
         let (_status, text) = self.raw(Method::POST, "/graphql", Some(&body)).await?;
-        let parsed: GqlResp<T> = serde_json::from_str(&text)
-            .map_err(|e| eyre!("decodificando GraphQL: {e}; cuerpo: {}", truncate(&text, 300)))?;
+        let parsed: GqlResp<T> = serde_json::from_str(&text).map_err(|e| {
+            eyre!(
+                "decodificando GraphQL: {e}; cuerpo: {}",
+                truncate(&text, 300)
+            )
+        })?;
         let errors = parsed.errors.unwrap_or_default();
         if !errors.is_empty() {
             let msg = errors
@@ -339,7 +372,14 @@ impl CfClient {
                 .filter(|m| !m.is_empty())
                 .collect::<Vec<_>>()
                 .join("; ");
-            bail!("{}", if msg.is_empty() { "error GraphQL".into() } else { msg });
+            bail!(
+                "{}",
+                if msg.is_empty() {
+                    "error GraphQL".into()
+                } else {
+                    msg
+                }
+            );
         }
         parsed.data.ok_or_else(|| eyre!("GraphQL sin datos"))
     }
@@ -412,8 +452,12 @@ fn error_context(text: &str, line: usize, max: usize) -> String {
     let start = offset.saturating_sub(max / 2).min(text.len());
     let end = (offset + max / 2).min(text.len());
     // No cortar en medio de un carácter UTF-8 multibyte.
-    let start = (start..=offset.min(text.len())).find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    let end = (end..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+    let start = (start..=offset.min(text.len()))
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
+    let end = (end..=text.len())
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(text.len());
     let prefix = if start > 0 { "…" } else { "" };
     let suffix = if end < text.len() { "…" } else { "" };
     format!("{prefix}{}{suffix}", &text[start..end])
@@ -428,7 +472,9 @@ mod tests {
     /// Servidor local que responde tokens nuevos y cuenta cuántos refresh recibe.
     async fn mock_token_server(hits: Arc<AtomicUsize>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {

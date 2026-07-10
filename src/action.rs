@@ -4,9 +4,9 @@
 use crate::api::r2::ObjectList;
 use crate::components::r2::BucketInfo;
 use crate::model::{
-    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, PulledMessage,
-    QueryOutcome, Queue, QueueConsumer, QueueMetrics, R2Bucket, R2Object, Tunnel, WorkerMetrics,
-    WorkerScript, Zone,
+    Account, Binding, D1Database, Deployment, DnsRecord, IngressRule, PulledMessage, QueryOutcome,
+    Queue, QueueConsumer, QueueMetrics, R2Bucket, R2Object, Tunnel, WorkerMetrics, WorkerScript,
+    Zone,
 };
 
 #[derive(Debug, Clone)]
@@ -66,10 +66,7 @@ pub enum Action {
     /// Alternar el proxy del registro seleccionado (barra espaciadora).
     ToggleProxy,
     /// Confirmar borrado de un registro.
-    DeleteRecord {
-        zone_id: String,
-        record_id: String,
-    },
+    DeleteRecord { zone_id: String, record_id: String },
     /// Crear o editar un registro (desde el formulario).
     SubmitRecord {
         zone_id: String,
@@ -82,9 +79,7 @@ pub enum Action {
         priority: String,
     },
     /// Confirmar purga de caché de una zona.
-    PurgeCache {
-        zone_id: String,
-    },
+    PurgeCache { zone_id: String },
     /// Error en una operación DNS.
     DnsError(String),
     /// Mutación DNS OK: fija estado y recarga los registros de la zona.
@@ -103,18 +98,11 @@ pub enum Action {
     /// Crear un túnel nuevo con este nombre.
     CreateTunnel(String),
     /// Túnel creado: muestra el token del conector y recarga.
-    TunnelCreated {
-        name: String,
-        token: String,
-    },
+    TunnelCreated { name: String, token: String },
     /// Limpiar las conexiones de un túnel.
-    CleanupConnections {
-        tunnel_id: String,
-    },
+    CleanupConnections { tunnel_id: String },
     /// Borrar un túnel.
-    DeleteTunnel {
-        tunnel_id: String,
-    },
+    DeleteTunnel { tunnel_id: String },
     /// Añadir una ruta pública (regla de ingress) a un túnel; opcionalmente crea
     /// el CNAME proxied en la zona `dns_zone` (`None` = no crear DNS).
     AddTunnelRoute {
@@ -132,10 +120,7 @@ pub enum Action {
         path: String,
     },
     /// Borrar una ruta (regla de ingress) por hostname; NO borra el CNAME.
-    DeleteTunnelRoute {
-        tunnel_id: String,
-        hostname: String,
-    },
+    DeleteTunnelRoute { tunnel_id: String, hostname: String },
     /// Mutación de ruta OK: fija estado, cierra el form y recarga las rutas del
     /// túnel actual (sin recargar toda la lista, que perdería la selección).
     TunnelRouteMutated(String),

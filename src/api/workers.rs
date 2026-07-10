@@ -406,15 +406,21 @@ pub fn parse_tail(raw: &str) -> Option<TailEvent> {
         summary = "evento".to_string();
     }
 
-    let is_error =
-        (!ev.outcome.is_empty() && ev.outcome != "ok") || !ev.exceptions.is_empty();
+    let is_error = (!ev.outcome.is_empty() && ev.outcome != "ok") || !ev.exceptions.is_empty();
 
     // Detalle (popup).
     let mut detail = Vec::new();
     if !trigger.is_empty() {
         detail.push(format!("▸ {trigger}"));
     }
-    let mut meta = format!("outcome: {}", if ev.outcome.is_empty() { "—" } else { &ev.outcome });
+    let mut meta = format!(
+        "outcome: {}",
+        if ev.outcome.is_empty() {
+            "—"
+        } else {
+            &ev.outcome
+        }
+    );
     if let Some(req) = ev.event.as_ref().and_then(|e| e.get("request"))
         && let Some(cf) = req.get("cf")
     {
@@ -456,7 +462,10 @@ pub fn parse_tail(raw: &str) -> Option<TailEvent> {
         detail.push(String::new());
         detail.push("headers:".to_string());
         for (k, v) in headers {
-            let val = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+            let val = v
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string());
             detail.push(format!("  {k}: {val}"));
         }
     }

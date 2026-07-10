@@ -1,9 +1,9 @@
 //! Barra inferior: estado a la izquierda, atajos de teclas a la derecha.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::ui::theme;
 
@@ -16,13 +16,13 @@ impl CommandBar {
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
         frame.render_widget(
-            Paragraph::new(format!(" {left}")).style(Style::default().fg(theme::FG)),
+            Paragraph::new(format!(" {left}")).style(Style::default().fg(theme::fg())),
             cols[0],
         );
         frame.render_widget(
             Paragraph::new(format!("{right} "))
                 .alignment(Alignment::Right)
-                .style(Style::default().fg(theme::DIM)),
+                .style(Style::default().fg(theme::dim())),
             cols[1],
         );
     }

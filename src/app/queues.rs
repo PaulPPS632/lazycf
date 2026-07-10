@@ -38,7 +38,10 @@ impl App {
         self.queues.begin_consumers();
         self.spawn_api(move |client, account_id, tx| async move {
             let consumers = client.list_consumers(&account_id, &queue_id).await.ok();
-            let _ = tx.send(Action::ConsumersLoaded { queue_id, consumers });
+            let _ = tx.send(Action::ConsumersLoaded {
+                queue_id,
+                consumers,
+            });
         });
     }
 
@@ -105,8 +108,11 @@ impl App {
         let Some(q) = self.queues.selected() else {
             return;
         };
-        let (queue_id, queue_name, paused) =
-            (q.queue_id.clone(), q.queue_name.clone(), !q.settings.delivery_paused);
+        let (queue_id, queue_name, paused) = (
+            q.queue_id.clone(),
+            q.queue_name.clone(),
+            !q.settings.delivery_paused,
+        );
         let (title, body) = if paused {
             (
                 "Pausar entrega".to_string(),
@@ -123,12 +129,20 @@ impl App {
         self.popup = Some(Popup::Confirm(Confirm {
             title,
             body,
-            on_yes: Action::PauseQueue { queue_id, queue_name, paused },
+            on_yes: Action::PauseQueue {
+                queue_id,
+                queue_name,
+                paused,
+            },
         }));
     }
 
     pub(crate) fn spawn_pause_queue(&mut self, queue_id: String, queue_name: String, paused: bool) {
-        self.status = if paused { "Pausando…".into() } else { "Reanudando…".into() };
+        self.status = if paused {
+            "Pausando…".into()
+        } else {
+            "Reanudando…".into()
+        };
         self.spawn_api(move |client, account_id, tx| async move {
             let action = match client
                 .set_delivery_paused(&account_id, &queue_id, &queue_name, paused)
@@ -174,7 +188,9 @@ impl App {
         else {
             return;
         };
-        self.popup = Some(Popup::SendMessage(SendMessageForm::new(queue_id, queue_name)));
+        self.popup = Some(Popup::SendMessage(SendMessageForm::new(
+            queue_id, queue_name,
+        )));
     }
 
     pub(crate) fn spawn_send_message(
@@ -212,7 +228,12 @@ impl App {
         self.popup = Some(Popup::ConsumerEdit(ConsumerEditForm::edit(queue_id, c)));
     }
 
-    pub(crate) fn spawn_update_consumer(&mut self, queue_id: String, consumer_id: String, body: serde_json::Value) {
+    pub(crate) fn spawn_update_consumer(
+        &mut self,
+        queue_id: String,
+        consumer_id: String,
+        body: serde_json::Value,
+    ) {
         self.spawn_api(move |client, account_id, tx| async move {
             let action = match client
                 .update_consumer(&account_id, &queue_id, &consumer_id, &body)
@@ -234,7 +255,12 @@ impl App {
         let Some(queue_id) = self.queues.selected_id() else {
             return;
         };
-        if self.queues.effective_consumers().iter().any(|c| c.is_worker()) {
+        if self
+            .queues
+            .effective_consumers()
+            .iter()
+            .any(|c| c.is_worker())
+        {
             self.status =
                 "Esta cola tiene un consumer worker: no se pueden espiar mensajes (usa 'l' para ver logs)"
                     .into();

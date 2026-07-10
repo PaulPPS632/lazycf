@@ -199,7 +199,10 @@ impl App {
         self.workers.begin_deployments();
         self.spawn_api(move |client, account_id, tx| async move {
             let deployments = client.list_deployments(&account_id, &script).await.ok();
-            let _ = tx.send(Action::DeploymentsLoaded { script, deployments });
+            let _ = tx.send(Action::DeploymentsLoaded {
+                script,
+                deployments,
+            });
         });
     }
 
@@ -228,15 +231,21 @@ impl App {
                 .worker_routes_for(&account_id, &zones, &script)
                 .await
                 .ok()
-                .map(|(routes, domains)| crate::components::workers::RoutingInfo {
-                    routes: routes.into_iter().map(|(zn, r)| (r.pattern, zn)).collect(),
-                    domains: domains.into_iter().map(|d| d.hostname).collect(),
-                });
+                .map(
+                    |(routes, domains)| crate::components::workers::RoutingInfo {
+                        routes: routes.into_iter().map(|(zn, r)| (r.pattern, zn)).collect(),
+                        domains: domains.into_iter().map(|d| d.hostname).collect(),
+                    },
+                );
             let _ = tx.send(Action::RoutingLoaded { script, routing });
         });
     }
 
-    pub(crate) fn spawn_rollback(&mut self, script: String, versions: Vec<crate::model::DeployVersion>) {
+    pub(crate) fn spawn_rollback(
+        &mut self,
+        script: String,
+        versions: Vec<crate::model::DeployVersion>,
+    ) {
         self.status = "Revirtiendo…".into();
         self.spawn_api(move |client, account_id, tx| async move {
             let action = match client
@@ -301,16 +310,17 @@ impl App {
                         script: script.clone(),
                         msg: e.to_string(),
                     });
-                    client.delete_tail(&account_id, &script, &tail_id).await.ok();
+                    client
+                        .delete_tail(&account_id, &script, &tail_id)
+                        .await
+                        .ok();
                     let _ = tx.send(Action::TailEnded { script });
                     return;
                 }
             };
             // Mensaje de apertura del protocolo trace-v1 (como wrangler);
             // los filtros ya fueron en el POST de creación.
-            let _ = ws
-                .send(Message::Text("{\"debug\":false}".into()))
-                .await;
+            let _ = ws.send(Message::Text("{\"debug\":false}".into())).await;
             let _ = tx.send(Action::TailStarted {
                 script: script.clone(),
             });
@@ -348,7 +358,10 @@ impl App {
                 }
             }
             let _ = ws.close(None).await;
-            client.delete_tail(&account_id, &script, &tail_id).await.ok();
+            client
+                .delete_tail(&account_id, &script, &tail_id)
+                .await
+                .ok();
             let _ = tx.send(Action::TailEnded { script });
         });
     }
